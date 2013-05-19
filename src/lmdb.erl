@@ -1,7 +1,8 @@
 %%-------------------------------------------------------------------
-%% This file is part of EMDB - Erlang MDB API
+%% This file is part of LMDB - Erlang Lightning MDB API
 %%
 %% Copyright (c) 2012 by Aleph Archives. All rights reserved.
+%% Copyright (c) 2013 by Basho Technologies, Inc. All rights reserved.
 %%
 %%-------------------------------------------------------------------
 %% Redistribution and use in source and binary forms, with or without
@@ -25,13 +26,13 @@
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 %%-------------------------------------------------------------------
 
--module(emdb).
+-module(lmdb).
 
 %%====================================================================
 %% EXPORTS
 %%====================================================================
 -export([
-         open/1,
+         %open/1,
          open/2,
          open/3,
 
@@ -52,7 +53,7 @@
 %% config for testing
 -ifdef(TEST).
 -ifdef(EQC).
-%include_lib("eqc/include/eqc.hrl").
+-include_lib("eqc/include/eqc.hrl").
 -define(QC_OUT(P), eqc:on_output(fun(Str, Args) -> io:format(user, Str, Args) end, P)).
 -endif.
 -include_lib("eunit/include/eunit.hrl").
@@ -61,15 +62,15 @@
 %%====================================================================
 %% Includes
 %%====================================================================
--include("emdb.hrl").
+-include("lmdb.hrl").
 -include("async_nif.hrl").
 
 %%====================================================================
 %% MACROS
 %%====================================================================
--define(EMDB_DRIVER_NAME, "emdb").
+-define(LMDB_DRIVER_NAME, "lmdb").
 -define(NOT_LOADED, not_loaded(?LINE)).
--define(MDB_MAP_SIZE, 10485760). %% 10MB
+-define(MDB_MAP_SIZE, 2147483648). %% 2GB in bytes
 
 %%====================================================================
 %% PUBLIC API
@@ -79,8 +80,8 @@
 %% @doc Create a new MDB database
 %% @end
 %%--------------------------------------------------------------------
-open(DirName) ->
-    open(DirName, ?MDB_MAP_SIZE).
+%open(DirName) ->
+%    open(DirName, ?MDB_MAP_SIZE).
 open(DirName, MapSize)
   when is_integer(MapSize)
        andalso MapSize > 0 ->
@@ -155,7 +156,7 @@ init() ->
         Path ->
             Path
     end,
-    erlang:load_nif(filename:join(PrivDir, ?EMDB_DRIVER_NAME), 0).
+    erlang:load_nif(filename:join(PrivDir, ?LMDB_DRIVER_NAME), 0).
 
 
 %%--------------------------------------------------------------------
@@ -170,20 +171,21 @@ not_loaded(Line) ->
 %% ===================================================================
 -ifdef(TEST).
 
--define(TEST_DATA_DIR, "test/basics").
-
-open_test_db(DataDir) ->
+open_test_db() ->
     {ok, CWD} = file:get_cwd(),
-    Path = filename:join([CWD, DataDir]),
-    ?cmd("rm -rf " ++ Path),
-    ?assertMatch(ok, filelib:ensure_dir(filename:join([Path, "x"]))),
-    {ok, Handle} = ?MODULE:open(Path),
+    DataDir = filename:join([CWD, "test", "eunit"]),
+    ?cmd("rm -rf " ++ DataDir),
+    ?assertMatch(ok, filelib:ensure_dir(filename:join([DataDir, "x"]))),
+    {ok, Handle} = ?MODULE:open(DataDir, 2147483648),
+    [?MODULE:upd(Handle, crypto:sha(<<X>>),
+		 crypto:rand_bytes(crypto:rand_uniform(128, 4096))) ||
+	X <- lists:seq(1, 100)],
     Handle.
 
 basics_test_() ->
     {setup,
      fun() ->
-             open_test_db(?TEST_DATA_DIR)
+             open_test_db()
      end,
      fun(Handle) ->
              ok = ?MODULE:close(Handle)
@@ -192,16 +194,16 @@ basics_test_() ->
              {inorder,
               [{"open and close a database",
                 fun() ->
-                        Handle = open_test_db(Handle)
+                        Handle = open_test_db()
                 end},
                {"create, then drop an empty database",
                 fun() ->
-                        Handle = open_test_db(Handle),
+                        Handle = open_test_db(),
                         ?assertMatch(ok, ?MODULE:drop(Handle))
                 end},
                {"create, put an item, get it, then drop the database",
                 fun() ->
-                        Handle = open_test_db(Handle),
+                        Handle = open_test_db(),
                         ?assertMatch(ok, ?MODULE:put(Handle, <<"a">>, <<"apple">>)),
                         ?assertMatch(ok, ?MODULE:put(Handle, <<"b">>, <<"boy">>)),
                         ?assertMatch(ok, ?MODULE:put(Handle, <<"c">>, <<"cat">>)),
@@ -215,4 +217,63 @@ basics_test_() ->
               ]}
      end}.
 
+-ifdef(EQC).
+
+qc(P) ->
+    ?assert(eqc:quickcheck(?QC_OUT(P))).
+
+keys() ->
+    eqc_gen:non_empty(list(eqc_gen:non_empty(binary()))).
+
+values() ->
+    eqc_gen:non_empty(list(binary())).
+
+ops(Keys, Values) ->
+    {oneof([put, delete]), oneof(Keys), oneof(Values)}.
+
+apply_kv_ops([], _Handle, Acc0) ->
+    Acc0;
+apply_kv_ops([{put, K, V} | Rest], Handle, Acc0) ->
+    ok = ?MODULE:put(Handle, K, V),
+    apply_kv_ops(Rest, Handle, orddict:store(K, V, Acc0));
+apply_kv_ops([{del, K, _} | Rest], Handle, Acc0) ->
+    ok = case ?MODULE:del(Handle, K) of
+             ok ->
+                 ok;
+             not_found ->
+                 ok;
+             Else ->
+                 Else
+         end,
+    apply_kv_ops(Rest, Handle, orddict:store(K, deleted, Acc0)).
+
+prop_put_delete() ->
+    ?LET({Keys, Values}, {keys(), values()},
+         ?FORALL(Ops, eqc_gen:non_empty(list(ops(Keys, Values))),
+                 begin
+                     {ok, CWD} = file:get_cwd(),
+		     DataDir = filename:join([CWD, "test", "eqc"]),
+                     ?cmd("rm -rf " ++ DataDir),
+                     ok = filelib:ensure_dir(filename:join([DataDir, "x"])),
+                     {ok, Handle} = ?MODULE:open(DataDir, 2147483648),
+                     try
+                         Model = apply_kv_ops(Ops, Handle, []),
+
+                         %% Validate that all deleted values return not_found
+                         F = fun({K, deleted}) ->
+                                     ?assertEqual(not_found, ?MODULE:get(Handle, K));
+                                ({K, V}) ->
+                                     ?assertEqual({ok, V}, ?MODULE:get(Handle, K))
+                             end,
+                         lists:map(F, Model),
+                         true
+                     after
+                         ?MODULE:close(Handle)
+                     end
+                 end)).
+
+prop_put_delete_test_() ->
+    {timeout, 3*60, fun() -> qc(prop_put_delete()) end}.
+
+-endif.
 -endif.

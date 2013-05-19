@@ -1,7 +1,8 @@
 %%-------------------------------------------------------------------
-%% This file is part of EMDB - Erlang MDB API
+%% This file is part of LMDB - Erlang Lightning MDB API
 %%
 %% Copyright (c) 2012 by Aleph Archives. All rights reserved.
+%% Copyright (c) 2013 by Basho Technologies, Inc. All rights reserved.
 %%
 %%-------------------------------------------------------------------
 %% Redistribution and use in source and binary forms, with or without
