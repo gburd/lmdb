@@ -1,16 +1,25 @@
-EMDB====EMDB is a NIF library for the [Memory-Mapped Database](http://highlandsun.com/hyc/mdb/) database, aka. MDB.The main purpose of this package is to provide a **very fast** Riak [backend](http://wiki.basho.com/Storage-Backends.html).
+EMDB
+====
 
-But this module could also be used as a general key-value store to replace:
+EMDB is a NIF library for the [Memory-Mapped Database](http://highlandsun.com/hyc/mdb/) database, aka. MDB.
 
-* [DETS](http://www.erlang.org/doc/man/dets.html)
-* TokyoCabinet: [TCERL](http://code.google.com/p/tcerl/)
-* [QDBM](http://fallabs.com/qdbm/)
-* [Bitcask](https://github.com/basho/bitcask)
-* [eLevelDB](https://github.com/basho/eleveldb)
-* [BerkleyDB](http://www.oracle.com/technetwork/products/berkeleydb/overview/index.html)
-* ...Requirements------------
-* Erlang R14B04+* GCC 4.2+ or MS VisualStudio 2010+Build-----$ makeAPI---
-The following functions were implemented:
+The main purpose of this package is to provide an Erlang API for this excellent BTREE implementation.  Secondly to build an alternative Riak/KV [backend](http://wiki.basho.com/Storage-Backends.html) and Riak's AAE feature based on this.  Finally it'd be nice to build an ETS-compatible API (ala "lets" for LevelDB) to ease adoption in other places where DETS is just not up to the task.
+
+Requirements
+------------
+* Erlang R14B04+
+* GCC 4.2+ or MS VisualStudio 2010+
+
+Build
+-----
+
+$ make
+
+
+API
+---
+
+The following functions were implemented:
 
 * `open/1`: equivalent to `emdb:open(DirName, 10485760)`.
 * `open/2`: equivalent to `emdb:open(DirName, 10485760, 0)`.
@@ -22,13 +31,14 @@ But this module could also be used as a general key-value store to replace:
 * `put/2`: inserts Key with value Val into the database. Assumes that the key is not present, 'key_exit' is returned otherwise.
 * `get/1`: retrieves the value stored with Key in the database.
 * `del/1`: Removes the key-value with key Key from database.
-* `update/2`: inserts Key with value Val into the database if the key is not present, otherwise updates Key to value Val.
+* `update/2` or `upd/2`: inserts Key with value Val into the database if the key is not present, otherwise updates Key to value Val.
 * `drop/1`: deletes all key-value pairs in the database.
 
 
 Usage
 -----
 
+```
 $ make
 $ ./start.sh
 	%% create a new database
@@ -82,32 +92,32 @@ $ ./start.sh
 	...
 
 	17> q().
-
+```
 
 #### Note:
-The code below creates a new database with **80GB** MapSize, **avoid fsync**
-after each commit (for max speed) and use the experimental **MDB_FIXEDMAP**.
+The code below creates a new database with **80GB** MapSize, **avoids fsync** after each commit (for an "ACI" but not "D" database we trade durability for speed) and uses the experimental **MDB_FIXEDMAP**.
 
+```
 	{ok, Handle} = emdb:open("/tmp/emdb2", 85899345920, ?MDB_NOSYNC bor ?MDB_FIXEDMAP).
+```
 
 Performance
 -----------
 
-For maximum speed, this library use only binaries for both keys and values.
-
-See the impressive [microbench](http://highlandsun.com/hyc/mdb/microbench/) against:
+See the [microbench](http://highlandsun.com/hyc/mdb/microbench/) against:
 * Google's LevelDB (which is slower and can stall unlike Basho's fork of LevelDB)
 * SQLite3
 * Kyoto TreeDB
 * BerkeleyDB 5.x
 
-MDB performs better on 64-bit arch.
+MDB performs mmap's the database, so unless your dataset is < 2^32 bytes you'll
+need to run on a 64-bit arch system.
 
 
 Supported Operating Systems
 --------------
 
-Should work on 32/64-bit architectures:
+Should work on:
 
 * Linux
 * OSX
@@ -124,12 +134,23 @@ TODO
 * basho_bench driver
 * EQC, PULSE testing
 * Key expirey
-* Atomic group commit (for 2i)
-
-Volunteers are always welcome!
+* renaming
+  * emdb -> lmdb
+  * emdb.c -> lmdb_nif.c
+* improve stats
+* txn API
+* cursor API
+* config
+* use async_nif affinity
+* riak_kv backend
+  * use dups
+  * 2i
+* aae alternative
 
 Status
 ------
+
+Work in progress, not production quality and not supported by Basho Technologies.
 
 LICENSE
 -------
