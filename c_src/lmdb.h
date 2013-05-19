@@ -1,7 +1,9 @@
-/** @file mdb.h
- *	@brief memory-mapped database library
+/** @file lmdb.h
+ *	@brief Lightning memory-mapped database library
  *
- *	@mainpage	MDB Memory-Mapped Database Manager
+ *	@mainpage	Lightning Memory-Mapped Database Manager (MDB)
+ *
+ *	@section intro_sec Introduction
  *	MDB is a Btree-based database management library modeled loosely on the
  *	BerkeleyDB API, but much simplified. The entire database is exposed
  *	in a memory map, and all data fetches return data directly
@@ -38,9 +40,69 @@
  *	corrupt the database. Of course if your application code is known to
  *	be bug-free (...) then this is not an issue.
  *
+ *	@section caveats_sec Caveats
+ *	Troubleshooting the lock file, plus semaphores on BSD systems:
+ *
+ *	- A broken lockfile can cause sync issues.
+ *	  Stale reader transactions left behind by an aborted program
+ *	  cause further writes to grow the database quickly, and
+ *	  stale locks can block further operation.
+ *
+ *	  Fix: Terminate all programs using the database, or make
+ *	  them close it.  Next database user will reset the lockfile.
+ *
+ *	- On BSD systems or others configured with MDB_USE_POSIX_SEM,
+ *	  startup can fail due to semaphores owned by another userid.
+ *
+ *	  Fix: Open and close the database as the user which owns the
+ *	  semaphores (likely last user) or as root, while no other
+ *	  process is using the database.
+ *
+ *	Restrictions/caveats (in addition to those listed for some functions):
+ *
+ *	- Only the database owner should normally use the database on
+ *	  BSD systems or when otherwise configured with MDB_USE_POSIX_SEM.
+ *	  Multiple users can cause startup to fail later, as noted above.
+ *
+ *	- A thread can only use one transaction at a time, plus any child
+ *	  transactions.  Each transaction belongs to one thread.  See below.
+ *	  The #MDB_NOTLS flag changes this for read-only transactions.
+ *
+ *	- Use an MDB_env* in the process which opened it, without fork()ing.
+ *
+ *	- Do not have open an MDB database twice in the same process at
+ *	  the same time.  Not even from a plain open() call - close()ing it
+ *	  breaks flock() advisory locking.
+ *
+ *	- Avoid long-lived transactions.  Read transactions prevent
+ *	  reuse of pages freed by newer write transactions, thus the
+ *	  database can grow quickly.  Write transactions prevent
+ *	  other write transactions, since writes are serialized.
+ *
+ *	- Avoid suspending a process with active transactions.  These
+ *	  would then be "long-lived" as above.  Also read transactions
+ *	  suspended when writers commit could sometimes see wrong data.
+ *
+ *	...when several processes can use a database concurrently:
+ *
+ *	- Avoid aborting a process with an active transaction.
+ *	  The transaction becomes "long-lived" as above until the lockfile
+ *	  is reset, since the process may not remove it from the lockfile.
+ *
+ *	- If you do that anyway, close the environment once in a while,
+ *	  so the lockfile can get reset.
+ *
+ *	- Do not use MDB databases on remote filesystems, even between
+ *	  processes on the same host.  This breaks flock() on some OSes,
+ *	  possibly memory map sync, and certainly sync between programs
+ *	  on different hosts.
+ *
+ *	- Opening a database can fail if another process is opening or
+ *	  closing it at exactly the same time.
+ *
  *	@author	Howard Chu, Symas Corporation.
  *
- *	@copyright Copyright 2011-2012 Howard Chu, Symas Corp. All rights reserved.
+ *	@copyright Copyright 2011-2013 Howard Chu, Symas Corp. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted only as authorized by the OpenLDAP
@@ -50,7 +112,7 @@
  * top-level directory of the distribution or, alternatively, at
  * <http://www.OpenLDAP.org/license.html>.
  *
- * 	@par Derived From:
+ *	@par Derived From:
  * This code is derived from btree.c written by Martin Hedenfalk.
  *
  * Copyright (c) 2009, 2010 Martin Hedenfalk <martin@bzero.se>
@@ -67,8 +129,8 @@
  * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT OF
  * OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
  */
-#ifndef _MDB_H_
-#define _MDB_H_
+#ifndef _LMDB_H_
+#define _LMDB_H_
 
 #include <sys/types.h>
 
@@ -76,8 +138,15 @@
 extern "C" {
 #endif
 
-/** @defgroup public Public API
+#ifdef _MSC_VER
+typedef	int	mdb_mode_t;
+#else
+typedef	mode_t	mdb_mode_t;
+#endif
+
+/** @defgroup mdb MDB API
  *	@{
+ *	@brief OpenLDAP Lightning Memory-Mapped Database Manager
  */
 /** @defgroup Version Version Macros
  *	@{
@@ -87,7 +156,7 @@ extern "C" {
 /** Library minor version */
 #define MDB_VERSION_MINOR	9
 /** Library patch version */
-#define MDB_VERSION_PATCH	4
+#define MDB_VERSION_PATCH	6
 
 /** Combine args a,b,c into a single integer for easy version comparisons */
 #define MDB_VERINT(a,b,c)	(((a) << 24) | ((b) << 16) | (c))
@@ -97,7 +166,7 @@ extern "C" {
 	MDB_VERINT(MDB_VERSION_MAJOR,MDB_VERSION_MINOR,MDB_VERSION_PATCH)
 
 /** The release date of this library version */
-#define MDB_VERSION_DATE	"September 14, 2012"
+#define MDB_VERSION_DATE	"January 10, 2013"
 
 /** A stringifier for the version info */
 #define MDB_VERSTR(a,b,c,d)	"MDB " #a "." #b "." #c ": (" d ")"
@@ -130,7 +199,17 @@ typedef unsigned int	MDB_dbi;
 /** @brief Opaque structure for navigating through a database */
 typedef struct MDB_cursor MDB_cursor;
 
-/** @brief Generic structure used for passing keys and data in and out of the database. */
+/** @brief Generic structure used for passing keys and data in and out
+ * of the database.
+ *
+ * Key sizes must be between 1 and the liblmdb build-time constant
+ * #MDB_MAXKEYSIZE inclusive. This currently defaults to 511. The
+ * same applies to data sizes in databases with the #MDB_DUPSORT flag.
+ * Other data items can in theory be from 0 to 0xffffffff bytes long.
+ *
+ * Values returned from the database are valid only until a subsequent
+ * update operation, or the end of the transaction.
+ */
 typedef struct MDB_val {
 	size_t		 mv_size;	/**< size of the data item */
 	void		*mv_data;	/**< address of the data item */
@@ -156,12 +235,14 @@ typedef int  (MDB_cmp_func)(const MDB_val *a, const MDB_val *b);
 typedef void (MDB_rel_func)(MDB_val *item, void *oldptr, void *newptr, void *relctx);
 
 /** @defgroup	mdb_env	Environment Flags
+ *
+ *	Values do not overlap Database Flags.
  *	@{
  */
-	/** mmap at a fixed address */
-#define MDB_FIXEDMAP	0x01
+	/** mmap at a fixed address (experimental) */
+#define MDB_FIXEDMAP		0x01
 	/** no environment directory */
-#define MDB_NOSUBDIR	0x02
+#define MDB_NOSUBDIR		0x4000
 	/** don't fsync after commit */
 #define MDB_NOSYNC		0x10000
 	/** read only */
@@ -170,11 +251,15 @@ typedef void (MDB_rel_func)(MDB_val *item, void *oldptr, void *newptr, void *rel
 #define MDB_NOMETASYNC		0x40000
 	/** use writable mmap */
 #define MDB_WRITEMAP		0x80000
-	/** use asynchronous msync */
+	/** use asynchronous msync when MDB_WRITEMAP is used */
 #define MDB_MAPASYNC		0x100000
+	/** tie reader locktable slots to #MDB_txn objects instead of to threads */
+#define MDB_NOTLS		0x200000
 /** @} */
 
-/**	@defgroup	mdb_open	Database Flags
+/**	@defgroup	mdb_dbi_open	Database Flags
+ *
+ *	Values do not overlap Environment Flags.
  *	@{
  */
 	/** use reverse string keys */
@@ -281,13 +366,19 @@ typedef enum MDB_cursor_op {
 #define MDB_READERS_FULL	(-30790)
 	/** Too many TLS keys in use - Windows only */
 #define MDB_TLS_FULL	(-30789)
-	/** Nested txn has too many dirty pages */
+	/** Txn has too many dirty pages */
 #define MDB_TXN_FULL	(-30788)
 	/** Cursor stack too deep - internal error */
 #define MDB_CURSOR_FULL	(-30787)
 	/** Page has not enough space - internal error */
 #define MDB_PAGE_FULL	(-30786)
-#define MDB_LAST_ERRCODE	MDB_PAGE_FULL
+	/** Database contents grew beyond environment mapsize */
+#define MDB_MAP_RESIZED	(-30785)
+	/** Database flags changed or would change */
+#define MDB_INCOMPATIBLE	(-30784)
+	/** Invalid reuse of reader locktable slot */
+#define MDB_BAD_RSLOT		(-30783)
+#define MDB_LAST_ERRCODE	MDB_BAD_RSLOT
 /** @} */
 
 /** @brief Statistics for a database in the environment */
@@ -300,6 +391,16 @@ typedef struct MDB_stat {
 	size_t		ms_overflow_pages;	/**< Number of overflow pages */
 	size_t		ms_entries;			/**< Number of data items */
 } MDB_stat;
+
+/** @brief Information about the environment */
+typedef struct MDB_envinfo {
+	void	*me_mapaddr;			/**< Address of map, if fixed */
+	size_t	me_mapsize;				/**< Size of the data memory map */
+	size_t	me_last_pgno;			/**< ID of the last used page */
+	size_t	me_last_txnid;			/**< ID of the last committed transaction */
+	unsigned int me_maxreaders;		/**< max reader slots in the environment */
+	unsigned int me_numreaders;		/**< max reader slots used in the environment */
+} MDB_envinfo;
 
 	/** @brief Return the mdb library version information.
 	 *
@@ -344,6 +445,7 @@ int  mdb_env_create(MDB_env **env);
 	 * @param[in] flags Special options for this environment. This parameter
 	 * must be set to 0 or by bitwise OR'ing together one or more of the
 	 * values described here.
+	 * Flags set by mdb_env_set_flags() are also used.
 	 * <ul>
 	 *	<li>#MDB_FIXEDMAP
 	 *      use a fixed address for the mmap region. This flag must be specified
@@ -359,24 +461,52 @@ int  mdb_env_create(MDB_env **env);
 	 *		under that directory. With this option, \b path is used as-is for
 	 *		the database main data file. The database lock file is the \b path
 	 *		with "-lock" appended.
-	 *	<li>#MDB_NOSYNC
-	 *		Don't perform a synchronous flush after committing a transaction. This means
-	 *		transactions will exhibit the ACI (atomicity, consistency, and isolation)
-	 *		properties, but not D (durability); that is database integrity will be
-	 *		maintained but it is possible some number of the most recently committed
-	 *		transactions may be undone after a system crash. The number of transactions
-	 *		at risk is governed by how often the system flushes dirty buffers to disk
-	 *		and how often #mdb_env_sync() is called. This flag may be changed
-	 *		at any time using #mdb_env_set_flags().
-	 *	<li>#MDB_NOMETASYNC
-	 *		Don't perform a synchronous flush of the meta page after committing
-	 *		a transaction. This is similar to the #MDB_NOSYNC case, but safer
-	 *		because the transaction data is still flushed. The meta page for any
-	 *		transaction N will be flushed by the data flush of transaction N+1.
-	 *		In case of a system crash, the last committed transaction may be
-	 *		lost. This flag may be changed at any time using #mdb_env_set_flags().
 	 *	<li>#MDB_RDONLY
-	 *		Open the environment in read-only mode. No write operations will be allowed.
+	 *		Open the environment in read-only mode. No write operations will be
+	 *		allowed. MDB will still modify the lock file - except on read-only
+	 *		filesystems, where MDB does not use locks.
+	 *	<li>#MDB_WRITEMAP
+	 *		Use a writeable memory map unless MDB_RDONLY is set. This is faster
+	 *		and uses fewer mallocs, but loses protection from application bugs
+	 *		like wild pointer writes and other bad updates into the database.
+	 *		Incompatible with nested transactions.
+	 *	<li>#MDB_NOMETASYNC
+	 *		Flush system buffers to disk only once per transaction, omit the
+	 *		metadata flush. Defer that until the system flushes files to disk,
+	 *		or next non-MDB_RDONLY commit or #mdb_env_sync(). This optimization
+	 *		maintains database integrity, but a system crash may undo the last
+	 *		committed transaction. I.e. it preserves the ACI (atomicity,
+	 *		consistency, isolation) but not D (durability) database property.
+	 *		This flag may be changed at any time using #mdb_env_set_flags().
+	 *	<li>#MDB_NOSYNC
+	 *		Don't flush system buffers to disk when committing a transaction.
+	 *		This optimization means a system crash can corrupt the database or
+	 *		lose the last transactions if buffers are not yet flushed to disk.
+	 *		The risk is governed by how often the system flushes dirty buffers
+	 *		to disk and how often #mdb_env_sync() is called.  However, if the
+	 *		filesystem preserves write order and the #MDB_WRITEMAP flag is not
+	 *		used, transactions exhibit ACI (atomicity, consistency, isolation)
+	 *		properties and only lose D (durability).  I.e. database integrity
+	 *		is maintained, but a system crash may undo the final transactions.
+	 *		Note that (#MDB_NOSYNC | #MDB_WRITEMAP) leaves the system with no
+	 *		hint for when to write transactions to disk, unless #mdb_env_sync()
+	 *		is called. (#MDB_MAPASYNC | #MDB_WRITEMAP) may be preferable.
+	 *		This flag may be changed at any time using #mdb_env_set_flags().
+	 *	<li>#MDB_MAPASYNC
+	 *		When using #MDB_WRITEMAP, use asynchronous flushes to disk.
+	 *		As with #MDB_NOSYNC, a system crash can then corrupt the
+	 *		database or lose the last transactions. Calling #mdb_env_sync()
+	 *		ensures on-disk database integrity until next commit.
+	 *		This flag may be changed at any time using #mdb_env_set_flags().
+	 *	<li>#MDB_NOTLS
+	 *		Don't use Thread-Local Storage. Tie reader locktable slots to
+	 *		#MDB_txn objects instead of to threads. I.e. #mdb_txn_reset() keeps
+	 *		the slot reseved for the #MDB_txn object. A thread may use parallel
+	 *		read-only transactions. A read-only transaction may span threads if
+	 *		the user synchronizes its use. Applications that multiplex many
+	 *		user threads over individual OS threads need this option. Such an
+	 *		application must also serialize the write transactions in an OS
+	 *		thread, since MDB's write locking is unaware of the user threads.
 	 * </ul>
 	 * @param[in] mode The UNIX permissions to set on created files. This parameter
 	 * is ignored on Windows.
@@ -385,13 +515,25 @@ int  mdb_env_create(MDB_env **env);
 	 * <ul>
 	 *	<li>#MDB_VERSION_MISMATCH - the version of the MDB library doesn't match the
 	 *	version that created the database environment.
-	 *	<li>EINVAL - the environment file headers are corrupted.
+	 *	<li>#MDB_INVALID - the environment file headers are corrupted.
 	 *	<li>ENOENT - the directory specified by the path parameter doesn't exist.
 	 *	<li>EACCES - the user didn't have permission to access the environment files.
 	 *	<li>EAGAIN - the environment was locked by another process.
 	 * </ul>
 	 */
-int  mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mode_t mode);
+int  mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t mode);
+
+	/** @brief Copy an MDB environment to the specified path.
+	 *
+	 * This function may be used to make a backup of an existing environment.
+	 * @param[in] env An environment handle returned by #mdb_env_create(). It
+	 * must have already been opened successfully.
+	 * @param[in] path The directory in which the copy will reside. This
+	 * directory must already exist and be writable but must otherwise be
+	 * empty.
+	 * @return A non-zero error value on failure and 0 on success.
+	 */
+int  mdb_env_copy(MDB_env *env, const char *path);
 
 	/** @brief Return statistics about the MDB environment.
 	 *
@@ -401,16 +543,24 @@ int  mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mode_t mod
 	 */
 int  mdb_env_stat(MDB_env *env, MDB_stat *stat);
 
+	/** @brief Return information about the MDB environment.
+	 *
+	 * @param[in] env An environment handle returned by #mdb_env_create()
+	 * @param[out] stat The address of an #MDB_envinfo structure
+	 * 	where the information will be copied
+	 */
+int  mdb_env_info(MDB_env *env, MDB_envinfo *stat);
+
 	/** @brief Flush the data buffers to disk.
 	 *
 	 * Data is always written to disk when #mdb_txn_commit() is called,
 	 * but the operating system may keep it buffered. MDB always flushes
 	 * the OS buffers upon commit as well, unless the environment was
-	 * opened with #MDB_NOSYNC.
+	 * opened with #MDB_NOSYNC or in part #MDB_NOMETASYNC.
 	 * @param[in] env An environment handle returned by #mdb_env_create()
-	 * @param[in] force If non-zero, force the flush to occur. Otherwise
+	 * @param[in] force If non-zero, force a synchronous flush.  Otherwise
 	 *  if the environment has the #MDB_NOSYNC flag set the flushes
-	 *	will be omitted.
+	 *	will be omitted, and with #MDB_MAPASYNC they will be asynchronous.
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
 	 * <ul>
@@ -432,7 +582,7 @@ void mdb_env_close(MDB_env *env);
 
 	/** @brief Set environment flags.
 	 *
-	 * This may be used to set some flags that weren't already set during
+	 * This may be used to set some flags in addition to those from
 	 * #mdb_env_open(), or to unset these flags.
 	 * @param[in] env An environment handle returned by #mdb_env_create()
 	 * @param[in] flags The flags to change, bitwise OR'ed together
@@ -478,6 +628,9 @@ int  mdb_env_get_path(MDB_env *env, const char **path);
 	 * of the database. The value should be chosen as large as possible,
 	 * to accommodate future growth of the database.
 	 * This function may only be called after #mdb_env_create() and before #mdb_env_open().
+	 * The size may be changed by closing and reopening the environment.
+	 * Any attempt to set a size smaller than the space already consumed
+	 * by the environment will be silently changed to the current size of the used space.
 	 * @param[in] env An environment handle returned by #mdb_env_create()
 	 * @param[in] size The size in bytes
 	 * @return A non-zero error value on failure and 0 on success. Some possible
@@ -488,13 +641,17 @@ int  mdb_env_get_path(MDB_env *env, const char **path);
 	 */
 int  mdb_env_set_mapsize(MDB_env *env, size_t size);
 
-	/** @brief Set the maximum number of threads for the environment.
+	/** @brief Set the maximum number of threads/reader slots for the environment.
 	 *
 	 * This defines the number of slots in the lock table that is used to track readers in the
 	 * the environment. The default is 126.
+	 * Starting a read-only transaction normally ties a lock table slot to the
+	 * current thread until the environment closes or the thread exits. If
+	 * MDB_NOTLS is in use, #mdb_txn_begin() instead ties the slot to the
+	 * MDB_txn object until it or the #MDB_env object is destroyed.
 	 * This function may only be called after #mdb_env_create() and before #mdb_env_open().
 	 * @param[in] env An environment handle returned by #mdb_env_create()
-	 * @param[in] readers The maximum number of threads
+	 * @param[in] readers The maximum number of reader lock table slots
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
 	 * <ul>
@@ -503,7 +660,7 @@ int  mdb_env_set_mapsize(MDB_env *env, size_t size);
 	 */
 int  mdb_env_set_maxreaders(MDB_env *env, unsigned int readers);
 
-	/** @brief Get the maximum number of threads for the environment.
+	/** @brief Get the maximum number of threads/reader slots for the environment.
 	 *
 	 * @param[in] env An environment handle returned by #mdb_env_create()
 	 * @param[out] readers Address of an integer to store the number of readers
@@ -515,11 +672,11 @@ int  mdb_env_set_maxreaders(MDB_env *env, unsigned int readers);
 	 */
 int  mdb_env_get_maxreaders(MDB_env *env, unsigned int *readers);
 
-	/** @brief Set the maximum number of databases for the environment.
+	/** @brief Set the maximum number of named databases for the environment.
 	 *
 	 * This function is only needed if multiple databases will be used in the
-	 * environment. Simpler applications that only use a single database can ignore
-	 * this option.
+	 * environment. Simpler applications that use the environment as a single
+	 * unnamed database can ignore this option.
 	 * This function may only be called after #mdb_env_create() and before #mdb_env_open().
 	 * @param[in] env An environment handle returned by #mdb_env_create()
 	 * @param[in] dbs The maximum number of databases
@@ -534,10 +691,10 @@ int  mdb_env_set_maxdbs(MDB_env *env, MDB_dbi dbs);
 	/** @brief Create a transaction for use with the environment.
 	 *
 	 * The transaction handle may be discarded using #mdb_txn_abort() or #mdb_txn_commit().
-	 * @note Transactions may not span threads; a transaction must only be used by a
-	 * single thread. Also, a thread may only have a single transaction.
-	 * @note Cursors may not span transactions; each cursor must be opened and closed
-	 * within a single transaction.
+	 * @note A transaction and its cursors must only be used by a single
+	 * thread, and a thread may only have a single transaction at a time.
+	 * If #MDB_NOTLS is in use, this does not apply to read-only transactions.
+	 * @note Cursors may not span transactions.
 	 * @param[in] env An environment handle returned by #mdb_env_create()
 	 * @param[in] parent If this parameter is non-NULL, the new transaction
 	 * will be a nested transaction, with the transaction indicated by \b parent
@@ -557,16 +714,21 @@ int  mdb_env_set_maxdbs(MDB_env *env, MDB_dbi dbs);
 	 * <ul>
 	 *	<li>#MDB_PANIC - a fatal error occurred earlier and the environment
 	 *		must be shut down.
-	 *	<li>ENOMEM - out of memory, or a read-only transaction was requested and
+	 *	<li>#MDB_MAP_RESIZED - another process wrote data beyond this MDB_env's
+	 *		mapsize and the environment must be shut down.
+	 *	<li>#MDB_READERS_FULL - a read-only transaction was requested and
 	 *		the reader lock table is full. See #mdb_env_set_maxreaders().
+	 *	<li>ENOMEM - out of memory.
 	 * </ul>
 	 */
 int  mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **txn);
 
 	/** @brief Commit all the operations of a transaction into the database.
 	 *
-	 * All cursors opened within the transaction will be closed by this call. The cursors
-	 * and transaction handle will be freed and must not be used again after this call.
+	 * The transaction handle is freed. It and its cursors must not be used
+	 * again after this call, except with #mdb_cursor_renew().
+	 * @note Earlier documentation incorrectly said all cursors would be freed.
+	 * Only write-transactions free cursors.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
@@ -574,28 +736,32 @@ int  mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **
 	 *	<li>EINVAL - an invalid parameter was specified.
 	 *	<li>ENOSPC - no more disk space.
 	 *	<li>EIO - a low-level I/O error occurred while writing.
-	 *	<li>ENOMEM - the transaction is nested and could not be merged into its parent.
+	 *	<li>ENOMEM - out of memory.
 	 * </ul>
 	 */
 int  mdb_txn_commit(MDB_txn *txn);
 
 	/** @brief Abandon all the operations of the transaction instead of saving them.
 	 *
-	 * All cursors opened within the transaction will be closed by this call. The cursors
-	 * and transaction handle will be freed and must not be used again after this call.
+	 * The transaction handle is freed. It and its cursors must not be used
+	 * again after this call, except with #mdb_cursor_renew().
+	 * @note Earlier documentation incorrectly said all cursors would be freed.
+	 * Only write-transactions free cursors.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
 	 */
 void mdb_txn_abort(MDB_txn *txn);
 
 	/** @brief Reset a read-only transaction.
 	 *
-	 * This releases the current reader lock but doesn't free the
-	 * transaction handle, allowing it to be used again later by #mdb_txn_renew().
-	 * It otherwise has the same effect as #mdb_txn_abort() but saves some memory
-	 * allocation/deallocation overhead if a thread is going to start a new
-	 * read-only transaction again soon.
-	 * All cursors opened within the transaction must be closed before the transaction
-	 * is reset.
+	 * Abort the transaction like #mdb_txn_abort(), but keep the transaction
+	 * handle. #mdb_txn_renew() may reuse the handle. This saves allocation
+	 * overhead if the process will start a new read-only transaction soon,
+	 * and also locking overhead if #MDB_NOTLS is in use. The reader table
+	 * lock is released, but the table slot stays tied to its thread or
+	 * #MDB_txn. Use mdb_txn_abort() to discard a reset handle, and to free
+	 * its lock table slot if MDB_NOTLS is in use.
+	 * Cursors opened within the transaction must not be used
+	 * again after this call, except with #mdb_cursor_renew().
 	 * Reader locks generally don't interfere with writers, but they keep old
 	 * versions of database pages allocated. Thus they prevent the old pages
 	 * from being reused when writers commit new data, and so under heavy load
@@ -620,12 +786,30 @@ void mdb_txn_reset(MDB_txn *txn);
 	 */
 int  mdb_txn_renew(MDB_txn *txn);
 
+/** Compat with version <= 0.9.4, avoid clash with libmdb from MDB Tools project */
+#define mdb_open(txn,name,flags,dbi)	mdb_dbi_open(txn,name,flags,dbi)
+/** Compat with version <= 0.9.4, avoid clash with libmdb from MDB Tools project */
+#define mdb_close(env,dbi)				mdb_dbi_close(env,dbi)
+
 	/** @brief Open a database in the environment.
 	 *
-	 * The database handle may be discarded by calling #mdb_close().  The
-	 * database handle resides in the shared environment, it is not owned
-	 * by the given transaction. Only one thread should call this function;
-	 * it is not mutex-protected in a read-only transaction.
+	 * A database handle denotes the name and parameters of a database,
+	 * independently of whether such a database exists.
+	 * The database handle may be discarded by calling #mdb_dbi_close().
+	 * The old database handle is returned if the database was already open.
+	 * The handle must only be closed once.
+	 * The database handle will be private to the current transaction until
+	 * the transaction is successfully committed. If the transaction is
+	 * aborted the handle will be closed automatically.
+	 * After a successful commit the
+	 * handle will reside in the shared environment, and may be used
+	 * by other transactions. This function must not be called from
+	 * multiple concurrent transactions. A transaction that uses this function
+	 * must finish (either commit or abort) before any other transaction may
+	 * use this function.
+	 *
+	 * To use named databases (with name != NULL), #mdb_env_set_maxdbs()
+	 * must be called before opening the environment.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
 	 * @param[in] name The name of the database to open. If only a single
 	 * 	database is needed in the environment, this value may be NULL.
@@ -667,15 +851,15 @@ int  mdb_txn_renew(MDB_txn *txn);
 	 * <ul>
 	 *	<li>#MDB_NOTFOUND - the specified database doesn't exist in the environment
 	 *		and #MDB_CREATE was not specified.
-	 *	<li>ENFILE - too many databases have been opened. See #mdb_env_set_maxdbs().
+	 *	<li>#MDB_DBS_FULL - too many databases have been opened. See #mdb_env_set_maxdbs().
 	 * </ul>
 	 */
-int  mdb_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *dbi);
+int  mdb_dbi_open(MDB_txn *txn, const char *name, unsigned int flags, MDB_dbi *dbi);
 
 	/** @brief Retrieve statistics for a database.
 	 *
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[out] stat The address of an #MDB_stat structure
 	 * 	where the statistics will be copied
 	 * @return A non-zero error value on failure and 0 on success. Some possible
@@ -690,20 +874,21 @@ int  mdb_stat(MDB_txn *txn, MDB_dbi dbi, MDB_stat *stat);
 	 *
 	 * This call is not mutex protected. Handles should only be closed by
 	 * a single thread, and only if no other threads are going to reference
-	 * the database handle any further.
+	 * the database handle or one of its cursors any further. Do not close
+	 * a handle if an existing transaction has modified its database.
 	 * @param[in] env An environment handle returned by #mdb_env_create()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 */
-void mdb_close(MDB_env *env, MDB_dbi dbi);
+void mdb_dbi_close(MDB_env *env, MDB_dbi dbi);
 
 	/** @brief Delete a database and/or free all its pages.
 	 *
-	 * If the \b del parameter is non-zero the DB handle will be closed
+	 * If the \b del parameter is 1, the DB handle will be closed
 	 * and the DB will be deleted.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
-	 * @param[in] del non-zero to delete the DB from the environment,
-	 * otherwise just free its pages.
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
+	 * @param[in] del 1 to delete the DB from the environment,
+	 * 0 to just free its pages.
 	 * @return A non-zero error value on failure and 0 on success.
 	 */
 int  mdb_drop(MDB_txn *txn, MDB_dbi dbi, int del);
@@ -713,13 +898,13 @@ int  mdb_drop(MDB_txn *txn, MDB_dbi dbi, int del);
 	 * The comparison function is called whenever it is necessary to compare a
 	 * key specified by the application with a key currently stored in the database.
 	 * If no comparison function is specified, and no special key flags were specified
-	 * with #mdb_open(), the keys are compared lexically, with shorter keys collating
+	 * with #mdb_dbi_open(), the keys are compared lexically, with shorter keys collating
 	 * before longer keys.
 	 * @warning This function must be called before any data access functions are used,
 	 * otherwise data corruption may occur. The same comparison function must be used by every
 	 * program accessing the database, every time the database is used.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[in] cmp A #MDB_cmp_func function
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
@@ -736,13 +921,13 @@ int  mdb_set_compare(MDB_txn *txn, MDB_dbi dbi, MDB_cmp_func *cmp);
 	 * This function only takes effect if the database was opened with the #MDB_DUPSORT
 	 * flag.
 	 * If no comparison function is specified, and no special key flags were specified
-	 * with #mdb_open(), the data items are compared lexically, with shorter items collating
+	 * with #mdb_dbi_open(), the data items are compared lexically, with shorter items collating
 	 * before longer items.
 	 * @warning This function must be called before any data access functions are used,
 	 * otherwise data corruption may occur. The same comparison function must be used by every
 	 * program accessing the database, every time the database is used.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[in] cmp A #MDB_cmp_func function
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
@@ -762,7 +947,7 @@ int  mdb_set_dupsort(MDB_txn *txn, MDB_dbi dbi, MDB_cmp_func *cmp);
 	 * Currently the relocation feature is unimplemented and setting
 	 * this function has no effect.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[in] rel A #MDB_rel_func function
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
@@ -776,7 +961,7 @@ int  mdb_set_relfunc(MDB_txn *txn, MDB_dbi dbi, MDB_rel_func *rel);
 	 *
 	 * See #mdb_set_relfunc and #MDB_rel_func for more details.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[in] ctx An arbitrary pointer for whatever the application needs.
 	 * It will be passed to the callback function set by #mdb_set_relfunc
 	 * as its \b relctx parameter whenever the callback is invoked.
@@ -801,8 +986,10 @@ int  mdb_set_relctx(MDB_txn *txn, MDB_dbi dbi, void *ctx);
 	 * database. The caller need not dispose of the memory, and may not
 	 * modify it in any way. For values returned in a read-only transaction
 	 * any modification attempts will cause a SIGSEGV.
+	 * @note Values returned from the database are valid only until a
+	 * subsequent update operation, or the end of the transaction.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[in] key The key to search for in the database
 	 * @param[out] data The data corresponding to the key
 	 * @return A non-zero error value on failure and 0 on success. Some possible
@@ -821,7 +1008,7 @@ int  mdb_get(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data);
 	 * if duplicates are disallowed, or adding a duplicate data item if
 	 * duplicates are allowed (#MDB_DUPSORT).
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[in] key The key to store in the database
 	 * @param[in,out] data The data to store
 	 * @param[in] flags Special options for this operation. This parameter
@@ -840,7 +1027,8 @@ int  mdb_get(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data);
 	 *		parameter will be set to point to the existing item.
 	 *	<li>#MDB_RESERVE - reserve space for data of the given size, but
 	 *		don't copy the given data. Instead, return a pointer to the
-	 *		reserved space, which the caller can fill in later. This saves
+	 *		reserved space, which the caller can fill in later - before
+	 *		the next update operation or the transaction ends. This saves
 	 *		an extra memcpy if the data is being generated later.
 	 *	<li>#MDB_APPEND - append the given key/data pair to the end of the
 	 *		database. No key comparisons are performed. This option allows
@@ -852,9 +1040,10 @@ int  mdb_get(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data);
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
 	 * <ul>
+	 *	<li>#MDB_MAP_FULL - the database is full, see #mdb_env_set_mapsize().
+	 *	<li>#MDB_TXN_FULL - the transaction has too many dirty pages.
 	 *	<li>EACCES - an attempt was made to write in a read-only transaction.
 	 *	<li>EINVAL - an invalid parameter was specified.
-	 *	<li>ENOMEM - the database is full, see #mdb_env_set_mapsize().
 	 * </ul>
 	 */
 int  mdb_put(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data,
@@ -872,7 +1061,7 @@ int  mdb_put(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data,
 	 * This function will return #MDB_NOTFOUND if the specified key/data
 	 * pair is not in the database.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[in] key The key to delete from the database
 	 * @param[in] data The data to delete
 	 * @return A non-zero error value on failure and 0 on success. Some possible
@@ -886,10 +1075,19 @@ int  mdb_del(MDB_txn *txn, MDB_dbi dbi, MDB_val *key, MDB_val *data);
 
 	/** @brief Create a cursor handle.
 	 *
-	 * Cursors are associated with a specific transaction and database and
-	 * may not span threads.
+	 * A cursor is associated with a specific transaction and database.
+	 * A cursor cannot be used when its database handle is closed.  Nor
+	 * when its transaction has ended, except with #mdb_cursor_renew().
+	 * It can be discarded with #mdb_cursor_close().
+	 * A cursor in a write-transaction can be closed before its transaction
+	 * ends, and will otherwise be closed when its transaction ends.
+	 * A cursor in a read-only transaction must be closed explicitly, before
+	 * or after its transaction ends. It can be reused with
+	 * #mdb_cursor_renew() before finally closing it.
+	 * @note Earlier documentation said that cursors in every transaction
+	 * were closed when the transaction committed or aborted.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[out] cursor Address where the new #MDB_cursor handle will be stored
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
@@ -902,17 +1100,19 @@ int  mdb_cursor_open(MDB_txn *txn, MDB_dbi dbi, MDB_cursor **cursor);
 	/** @brief Close a cursor handle.
 	 *
 	 * The cursor handle will be freed and must not be used again after this call.
+	 * Its transaction must still be live if it is a write-transaction.
 	 * @param[in] cursor A cursor handle returned by #mdb_cursor_open()
 	 */
 void mdb_cursor_close(MDB_cursor *cursor);
 
 	/** @brief Renew a cursor handle.
 	 *
-	 * Cursors are associated with a specific transaction and database and
-	 * may not span threads. Cursors that are only used in read-only
+	 * A cursor is associated with a specific transaction and database.
+	 * Cursors that are only used in read-only
 	 * transactions may be re-used, to avoid unnecessary malloc/free overhead.
 	 * The cursor may be associated with a new read-only transaction, and
 	 * referencing the same database handle as it was created with.
+	 * This may be done whether the previous transaction is live or dead.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
 	 * @param[in] cursor A cursor handle returned by #mdb_cursor_open()
 	 * @return A non-zero error value on failure and 0 on success. Some possible
@@ -942,6 +1142,7 @@ MDB_dbi mdb_cursor_dbi(MDB_cursor *cursor);
 	 * case of the #MDB_SET option, in which the \b key object is unchanged), and
 	 * the address and length of the data are returned in the object to which \b data
 	 * refers.
+	 * See #mdb_get() for restrictions on using the output values.
 	 * @param[in] cursor A cursor handle returned by #mdb_cursor_open()
 	 * @param[in,out] key The key for a retrieved item
 	 * @param[in,out] data The data of a retrieved item
@@ -994,6 +1195,8 @@ int  mdb_cursor_get(MDB_cursor *cursor, MDB_val *key, MDB_val *data,
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
 	 * <ul>
+	 *	<li>#MDB_MAP_FULL - the database is full, see #mdb_env_set_mapsize().
+	 *	<li>#MDB_TXN_FULL - the transaction has too many dirty pages.
 	 *	<li>EACCES - an attempt was made to modify a read-only database.
 	 *	<li>EINVAL - an invalid parameter was specified.
 	 * </ul>
@@ -1039,7 +1242,7 @@ int  mdb_cursor_count(MDB_cursor *cursor, size_t *countp);
 	 * This returns a comparison as if the two data items were keys in the
 	 * specified database.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[in] a The first item to compare
 	 * @param[in] b The second item to compare
 	 * @return < 0 if a < b, 0 if a == b, > 0 if a > b
@@ -1049,9 +1252,9 @@ int  mdb_cmp(MDB_txn *txn, MDB_dbi dbi, const MDB_val *a, const MDB_val *b);
 	/** @brief Compare two data items according to a particular database.
 	 *
 	 * This returns a comparison as if the two items were data items of
-	 * a sorted duplicates #MDB_DUPSORT database.
+	 * the specified database. The database must have the #MDB_DUPSORT flag.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
-	 * @param[in] dbi A database handle returned by #mdb_open()
+	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[in] a The first item to compare
 	 * @param[in] b The second item to compare
 	 * @return < 0 if a < b, 0 if a == b, > 0 if a > b
@@ -1062,4 +1265,6 @@ int  mdb_dcmp(MDB_txn *txn, MDB_dbi dbi, const MDB_val *a, const MDB_val *b);
 #ifdef __cplusplus
 }
 #endif
-#endif /* _MDB_H_ */
+#endif /* _LMDB_H_ */
+
+/*  * http://gitorious.org/mdb/mdb/blobs/raw/b389341b4b2413804726276d01676a6a9d05346f/libraries/liblmdb/lmdb.h */

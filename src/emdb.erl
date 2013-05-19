@@ -27,26 +27,48 @@
 
 -module(emdb).
 
-
 %%====================================================================
 %% EXPORTS
 %%====================================================================
 -export([
          open/1,
          open/2,
-         open/3
+         open/3,
+
+         close/1,
+
+         put/3,
+         get/2,
+         del/2,
+	 update/3, upd/3,
+
+         drop/1
         ]).
 
+
+%% internal export (ex. spawn, apply)
+-on_load(init/0).
+
+%% config for testing
+-ifdef(TEST).
+-ifdef(EQC).
+%include_lib("eqc/include/eqc.hrl").
+-define(QC_OUT(P), eqc:on_output(fun(Str, Args) -> io:format(user, Str, Args) end, P)).
+-endif.
+-include_lib("eunit/include/eunit.hrl").
+-endif.
 
 %%====================================================================
 %% Includes
 %%====================================================================
 -include("emdb.hrl").
-
+-include("async_nif.hrl").
 
 %%====================================================================
-%% Macros
+%% MACROS
 %%====================================================================
+-define(EMDB_DRIVER_NAME, "emdb").
+-define(NOT_LOADED, not_loaded(?LINE)).
 -define(MDB_MAP_SIZE, 10485760). %% 10MB
 
 %%====================================================================
@@ -59,21 +81,138 @@
 %%--------------------------------------------------------------------
 open(DirName) ->
     open(DirName, ?MDB_MAP_SIZE).
-open(DirName, MapSize) when is_integer(MapSize) andalso MapSize > 0 ->
+open(DirName, MapSize)
+  when is_integer(MapSize)
+       andalso MapSize > 0 ->
     open(DirName, MapSize, 0).
-open(DirName, MapSize, EnvFlags) when is_integer(MapSize) andalso MapSize > 0 andalso is_integer(EnvFlags) andalso EnvFlags >= 0 ->
+open(DirName, MapSize, EnvFlags)
+  when is_integer(MapSize) andalso MapSize > 0 andalso
+       is_integer(EnvFlags) andalso EnvFlags >= 0 ->
     %% ensure directory exists
-    ok = filelib:ensure_dir(DirName ++ "/"),
-    decorate(emdb_drv:open(DirName, MapSize, EnvFlags)).
+    ok = filelib:ensure_dir(filename:join([DirName, "x"])),
+    ?ASYNC_NIF_CALL(fun open/4, [DirName, MapSize, EnvFlags]).
+
+open(_AsyncRef, _DirName, _MapSize, _EnvFlags) ->
+    ?NOT_LOADED.
+
+close(Handle) ->
+    ?ASYNC_NIF_CALL(fun close/2, [Handle]).
+
+close(_AsyncRef, _Handle) ->
+    ?NOT_LOADED.
+
+put(Handle, Key, Val)
+  when is_binary(Key) andalso is_binary(Val) ->
+    ?ASYNC_NIF_CALL(fun put/4, [Handle, Key, Val]).
+
+put(_AsyncRef, _Handle, _Key, _Val) ->
+    ?NOT_LOADED.
+
+get(Handle, Key)
+  when is_binary(Key) ->
+    ?ASYNC_NIF_CALL(fun get/3, [Handle, Key]).
+
+get(_AsyncRef, _Handle, _Key) ->
+    ?NOT_LOADED.
+
+del(Handle, Key)
+  when is_binary(Key) ->
+    ?ASYNC_NIF_CALL(fun del/3, [Handle, Key]).
+
+del(_AsyncRef, _Handle, _Key) ->
+    ?NOT_LOADED.
+
+upd(Handle, Key, Val) ->
+    update(Handle, Key, Val).
+
+update(Handle, Key, Val)
+  when is_binary(Key) andalso is_binary(Val) ->
+    ?ASYNC_NIF_CALL(fun update/4, [Handle, Key, Val]).
+
+update(_AsyncRef, _Handle, _Key, _Val) ->
+    ?NOT_LOADED.
+
+drop(Handle) ->
+    ?ASYNC_NIF_CALL(fun drop/2, [Handle]).
+
+drop(_AsyncRef, _Handle) ->
+    ?NOT_LOADED.
 
 %%====================================================================
 %% PRIVATE API
 %%====================================================================
 
-%% @private
-decorate({ok, Handle}) ->
-    CDB = emdb_oop:new(Handle),
-    {ok, CDB};
+%%--------------------------------------------------------------------
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+init() ->
+    PrivDir = case code:priv_dir(?MODULE) of
+        {error, _} ->
+            EbinDir = filename:dirname(code:which(?MODULE)),
+            AppPath = filename:dirname(EbinDir),
+            filename:join(AppPath, "priv");
+        Path ->
+            Path
+    end,
+    erlang:load_nif(filename:join(PrivDir, ?EMDB_DRIVER_NAME), 0).
 
-decorate(Error) ->
-    Error.
+
+%%--------------------------------------------------------------------
+%% @doc
+%% @end
+%%--------------------------------------------------------------------
+not_loaded(Line) ->
+    erlang:nif_error({not_loaded, [{module, ?MODULE}, {line, Line}]}).
+
+%% ===================================================================
+%% EUnit tests
+%% ===================================================================
+-ifdef(TEST).
+
+-define(TEST_DATA_DIR, "test/basics").
+
+open_test_db(DataDir) ->
+    {ok, CWD} = file:get_cwd(),
+    Path = filename:join([CWD, DataDir]),
+    ?cmd("rm -rf " ++ Path),
+    ?assertMatch(ok, filelib:ensure_dir(filename:join([Path, "x"]))),
+    {ok, Handle} = ?MODULE:open(Path),
+    Handle.
+
+basics_test_() ->
+    {setup,
+     fun() ->
+             open_test_db(?TEST_DATA_DIR)
+     end,
+     fun(Handle) ->
+             ok = ?MODULE:close(Handle)
+     end,
+     fun(Handle) ->
+             {inorder,
+              [{"open and close a database",
+                fun() ->
+                        Handle = open_test_db(Handle)
+                end},
+               {"create, then drop an empty database",
+                fun() ->
+                        Handle = open_test_db(Handle),
+                        ?assertMatch(ok, ?MODULE:drop(Handle))
+                end},
+               {"create, put an item, get it, then drop the database",
+                fun() ->
+                        Handle = open_test_db(Handle),
+                        ?assertMatch(ok, ?MODULE:put(Handle, <<"a">>, <<"apple">>)),
+                        ?assertMatch(ok, ?MODULE:put(Handle, <<"b">>, <<"boy">>)),
+                        ?assertMatch(ok, ?MODULE:put(Handle, <<"c">>, <<"cat">>)),
+                        ?assertMatch({ok, <<"apple">>}, ?MODULE:get(Handle, <<"a">>)),
+                        ?assertMatch(ok, ?MODULE:update(Handle, <<"a">>, <<"ant">>)),
+                        ?assertMatch({ok, <<"ant">>}, ?MODULE:get(Handle, <<"a">>)),
+                        ?assertMatch(ok, ?MODULE:del(Handle, <<"a">>)),
+                        ?assertMatch(not_found, ?MODULE:get(Handle, <<"a">>)),
+                        ?assertMatch(ok, ?MODULE:drop(Handle))
+                end}
+              ]}
+     end}.
+
+-endif.
