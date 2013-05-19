@@ -11,7 +11,7 @@
 /* $OpenLDAP$ */
 /* This work is part of OpenLDAP Software <http://www.openldap.org/>.
  *
- * Copyright 2000-2012 The OpenLDAP Foundation.
+ * Copyright 2000-2013 The OpenLDAP Foundation.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -115,10 +115,10 @@ int mdb_midl_insert( MDB_IDL ids, MDB_ID id );
 #endif
 
 	/** Allocate an IDL.
-	 * Allocates memory for an IDL of a default size.
+	 * Allocates memory for an IDL of the given size.
 	 * @return	IDL on success, NULL on failure.
 	 */
-MDB_IDL mdb_midl_alloc();
+MDB_IDL mdb_midl_alloc(int num);
 
 	/** Free an IDL.
 	 * @param[in] ids	The IDL to free.
@@ -131,6 +131,14 @@ void mdb_midl_free(MDB_IDL ids);
 	 * @return	0 on no change, non-zero if shrunk.
 	 */
 int mdb_midl_shrink(MDB_IDL *idp);
+
+	/** Grow an IDL.
+	 * Add room for num additional elements.
+	 * @param[in,out] idp	Address of the IDL to grow.
+	 * @param[in] num	Number of elements to add.
+	 * @return	0 on success, -1 on failure.
+	 */
+int mdb_midl_grow(MDB_IDL *idp, int num);
 
 	/** Append an ID onto an IDL.
 	 * @param[in,out] idp	Address of the IDL to append to.
@@ -193,3 +201,5 @@ int mdb_mid2l_append( MDB_ID2L ids, MDB_ID2 *id );
 }
 #endif
 #endif	/* _MDB_MIDL_H_ */
+
+/* http://gitorious.org/mdb/mdb/blobs/raw/mdb.master/libraries/liblmdb/midl.h */

@@ -26,65 +26,86 @@ But this module could also be used as a general key-value store to replace:
 * `drop/1`: deletes all key-value pairs in the database.
 
 
-Usage-----$ make
+Usage
+-----
 
+$ make
 $ ./start.sh
+	%% create a new database
+	1> {ok, Handle} = emdb:open("/tmp/emdb1").
 
-	%% create a new database	1> {ok, Handle} = emdb:open("/tmp/emdb1").
+	%% insert the key <<"a">> with value <<"1">>
+	2> ok = emdb:put(Handle, <<"a">>, <<"1">>).
 
-	%% insert the key <<"a">> with value <<"1">>	2> ok = Handle:put(<<"a">>, <<"1">>).
+	%% try to re-insert the same key <<"a">>
+	3> key_exist = emdb:put(Handle, <<"a">>, <<"2">>).
 
-	%% try to re-insert the same key <<"a">>	3> key_exist = Handle:put(<<"a">>, <<"2">>).
+	%% add a new key-value pair
+	4> ok = emdb:put(Handle, <<"b">>, <<"2">>).
 
-	%% add a new key-value pair	4> ok = Handle:put(<<"b">>, <<"2">>).
+	%% search a non-existing key <<"c">>
+	5> none = emdb:get(Handle, <<"c">>).
 
-	%% search a non-existing key <<"c">>	5> none = Handle:get(<<"c">>).
+	%% retrieve the value for key <<"b">>
+	6> {ok, <<"2">>} = emdb:get(Handle, <<"b">>).
 
-	%% retrieve the value for key <<"b">>	6> {ok, <<"2">>} = Handle:get(<<"b">>).
+	%% retrieve the value for key <<"a">>
+	7> {ok, <<"1">>} = emdb:get(Handle, <<"a">>).
 
-	%% retrieve the value for key <<"a">>	7> {ok, <<"1">>} = Handle:get(<<"a">>).
-
-	%% delete key <<"b">>	8> ok = Handle:del(<<"b">>).
+	%% delete key <<"b">>
+	8> ok = emdb:del(Handle, <<"b">>).
 
 	%% search a non-existing key <<"b">>
-	9> none = Handle:get(<<"b">>).
+	9> none = emdb:get(Handle, <<"b">>).
 
-	%% delete a non-existing key <<"z">>	10> none = Handle:del(<<"z">>).
+	%% delete a non-existing key <<"z">>
+	10> none = emdb:del(Handle, <<"z">>).
 
-	%% ensure key <<"a">>'s value is still <<"1">>	11> {ok, <<"1">>} = Handle:get(<<"a">>).
+	%% ensure key <<"a">>'s value is still <<"1">>
+	11> {ok, <<"1">>} = emdb:get(Handle, <<"a">>).
+
 	%% update the value for key <<"a">>
-	12> ok = Handle:update(<<"a">>, <<"7">>).
+	12> ok = emdb:update(Handle, <<"a">>, <<"7">>).
 
 	%% check the new value for key <<"a">>
-	13> {ok, <<"7">>} = Handle:get(<<"a">>).
+	13> {ok, <<"7">>} = emdb:get(Handle, <<"a">>).
 
-	%% delete all key-value pairs in the database	14> ok = Handle:drop().
+	%% delete all key-value pairs in the database
+	14> ok = emdb:drop(Handle).
 
-	%% try to retrieve key <<"a">> value	15> none = Handle:get(<<"a">>).
+	%% try to retrieve key <<"a">> value
+	15> none = emdb:get(Handle, <<"a">>).
 
-	%% close the database	16> ok = Handle:close().
+	%% close the database
+	16> ok = emdb:close(Handle).
 
 	...
 
-	17> q().  
-  
+	17> q().
 
-####Note:
+
+#### Note:
 The code below creates a new database with **80GB** MapSize, **avoid fsync**
-after each commit (for max speed) and use the experimental **MDB_FIXEDMAP**.	{ok, Handle} = emdb:open("/tmp/emdb2", 85899345920, ?MDB_NOSYNC bor ?MDB_FIXEDMAP).
-	
-Performance-----------For maximum speed, this library use only binaries for both keys and values.
-See the impressive [microbench](http://highlandsun.com/hyc/mdb/microbench/) against:
+after each commit (for max speed) and use the experimental **MDB_FIXEDMAP**.
 
-* Google's LevelDB
-* SQLite
+	{ok, Handle} = emdb:open("/tmp/emdb2", 85899345920, ?MDB_NOSYNC bor ?MDB_FIXEDMAP).
+
+Performance
+-----------
+
+For maximum speed, this library use only binaries for both keys and values.
+
+See the impressive [microbench](http://highlandsun.com/hyc/mdb/microbench/) against:
+* Google's LevelDB (which is slower and can stall unlike Basho's fork of LevelDB)
+* SQLite3
 * Kyoto TreeDB
-* BerkeleyDB
+* BerkeleyDB 5.x
 
 MDB performs better on 64-bit arch.
 
 
-Supported OSes--------------
+Supported Operating Systems
+--------------
 
 Should work on 32/64-bit architectures:
 
@@ -93,14 +114,24 @@ Should work on 32/64-bit architectures:
 * FreeBSD
 * Windows
 
-TODO----
+TODO
+----
 
-* Unit tests* PropEr testing
+* Fold over keys and/or values
+* Unit tests
+* PropEr testing
 * Bulk "writing"
+* basho_bench driver
+* EQC, PULSE testing
+* Key expirey
+* Atomic group commit (for 2i)
 
-Volunteers are always welcome!Status
+Volunteers are always welcome!
+
+Status
 ------
-#### Work in progress. Don't use it in production!
-LICENSE-------
-EMDB is Copyright (C) 2012 by Aleph Archives, and released under the [OpenLDAP](http://www.OpenLDAP.org/license.html) License.
 
+LICENSE
+-------
+
+EMDB is Copyright (C) 2012-2013 by Aleph Archives and Basho Technologies, Inc., and released under the [OpenLDAP](http://www.OpenLDAP.org/license.html) License.
