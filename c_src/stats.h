@@ -128,9 +128,13 @@ static unsigned int __log2_64(uint64_t x) {
      {                                                                  \
          uint8_t logs[64];                                              \
          uint8_t i, j, max_log = 0;                                     \
-         double m = (s->mean + name ## _stat_mean(s) / 2.0);            \
+         double m = 0.0;						\
                                                                         \
-         fprintf(stderr, "%s:async_nif request latency histogram:\n", mod); \
+	 if (s->n < nsamples)						\
+	     return;							\
+									\
+         fprintf(stderr, "\n%s:async_nif request latency histogram:\n", mod); \
+	 m = (s->mean + name ## _stat_mean(s) / 2.0);			\
          for (i = 0; i < 64; i++) {                                     \
              logs[i] = LOG2(s->histogram[i]);                           \
              if (logs[i] > max_log)                                     \
@@ -145,7 +149,7 @@ static unsigned int __log2_64(uint64_t x) {
                  fprintf(stderr, logs[j] >= i ?  "•" : " ");            \
              fprintf(stderr, "\n");                                     \
          }                                                              \
-         if (max_log == 0) {                                            \
+         if (max_log == 100) {                                          \
              fprintf(stderr, "[empty]\n");                              \
          } else {                                                       \
              fprintf(stderr, "     ns        μs        ms        s         ks\n"); \
