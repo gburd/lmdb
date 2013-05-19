@@ -1,7 +1,8 @@
 /* -------------------------------------------------------------------------
- * This file is part of EMDB - Erlang MDB API
+ * This file is part of LMDB - Erlang Lightning MDB API
  *
  * Copyright (c) 2012 by Aleph Archives. All rights reserved.
+%% Copyright (c) 2013 by Basho Technologies, Inc. All rights reserved.
  *
  * -------------------------------------------------------------------------
  * Redistribution and use in source and binary forms, with or without
@@ -37,27 +38,27 @@
 #include "stats.h"
 #include "lmdb.h"
 
-STAT_DECL(emdb_get, 1000);
-STAT_DECL(emdb_put, 1000);
-STAT_DECL(emdb_del, 1000);
-STAT_DECL(emdb_upd, 1000);
+STAT_DECL(lmdb_get, 1000);
+STAT_DECL(lmdb_put, 1000);
+STAT_DECL(lmdb_del, 1000);
+STAT_DECL(lmdb_upd, 1000);
 
-static ErlNifResourceType *emdb_RESOURCE;
-struct emdb {
+static ErlNifResourceType *lmdb_RESOURCE;
+struct lmdb {
     MDB_env *env;
     MDB_dbi dbi;
-    STAT_DEF(emdb_get);
-    STAT_DEF(emdb_put);
-    STAT_DEF(emdb_del);
-    STAT_DEF(emdb_upd);
+    STAT_DEF(lmdb_get);
+    STAT_DEF(lmdb_put);
+    STAT_DEF(lmdb_del);
+    STAT_DEF(lmdb_upd);
 };
 
-struct emdb_priv_data {
+struct lmdb_priv_data {
     void *async_nif_priv; // Note: must be first element in struct
 };
 
 /* Global init for async_nif. */
-ASYNC_NIF_INIT(emdb);
+ASYNC_NIF_INIT(lmdb);
 
 /* Atoms (initialized in on_load) */
 static ERL_NIF_TERM ATOM_ERROR;
@@ -182,7 +183,7 @@ __strerror_term(ErlNifEnv* env, int err)
  * argv[2]    flags
  */
 ASYNC_NIF_DECL(
-  emdb_open,
+  lmdb_open,
   { // struct
 
       char dirname[MAXPATHLEN];
@@ -206,16 +207,16 @@ ASYNC_NIF_DECL(
 
       ERL_NIF_TERM err;
       MDB_txn *txn;
-      struct emdb *handle;
+      struct lmdb *handle;
       int ret;
 
-      if ((handle = enif_alloc_resource(emdb_RESOURCE, sizeof(struct emdb))) == NULL)
+      if ((handle = enif_alloc_resource(lmdb_RESOURCE, sizeof(struct lmdb))) == NULL)
 	  FAIL_ERR(ENOMEM, err3);
 
-      STAT_INIT(handle, emdb_get);
-      STAT_INIT(handle, emdb_put);
-      STAT_INIT(handle, emdb_upd);
-      STAT_INIT(handle, emdb_del);
+      STAT_INIT(handle, lmdb_get);
+      STAT_INIT(handle, lmdb_put);
+      STAT_INIT(handle, lmdb_upd);
+      STAT_INIT(handle, lmdb_del);
 
       CHECK(mdb_env_create(&(handle->env)), err2);
 
@@ -253,15 +254,15 @@ ASYNC_NIF_DECL(
  * argv[0]    reference to the MDB handle resource
  */
 ASYNC_NIF_DECL(
-  emdb_close,
+  lmdb_close,
   { // struct
 
-      struct emdb *handle;
+      struct lmdb *handle;
   },
   { // pre
 
       if (!(argc == 1 &&
-	    enif_get_resource(env, argv[0], emdb_RESOURCE, (void**)&args->handle))) {
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle))) {
 	  ASYNC_NIF_RETURN_BADARG();
       }
       if (!args->handle->env)
@@ -270,15 +271,15 @@ ASYNC_NIF_DECL(
   },
   { // work
 
-      STAT_PRINT(args->handle, emdb_get, "emdb");
-      STAT_PRINT(args->handle, emdb_put, "emdb");
-      STAT_PRINT(args->handle, emdb_del, "emdb");
-      STAT_PRINT(args->handle, emdb_upd, "emdb");
+      STAT_PRINT(args->handle, lmdb_get, "lmdb");
+      STAT_PRINT(args->handle, lmdb_put, "lmdb");
+      STAT_PRINT(args->handle, lmdb_del, "lmdb");
+      STAT_PRINT(args->handle, lmdb_upd, "lmdb");
       mdb_env_close(args->handle->env);
-      STAT_RESET(args->handle, emdb_get);
-      STAT_RESET(args->handle, emdb_put);
-      STAT_RESET(args->handle, emdb_del);
-      STAT_RESET(args->handle, emdb_upd);
+      STAT_RESET(args->handle, lmdb_get);
+      STAT_RESET(args->handle, lmdb_put);
+      STAT_RESET(args->handle, lmdb_del);
+      STAT_RESET(args->handle, lmdb_upd);
       args->handle->env = NULL;
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
@@ -297,24 +298,24 @@ ASYNC_NIF_DECL(
  * argv[2]    value as an Erlang binary
  */
 ASYNC_NIF_DECL(
-  emdb_put,
+  lmdb_put,
   { // struct
 
-      struct emdb *handle;
+      struct lmdb *handle;
       ERL_NIF_TERM key;
       ERL_NIF_TERM val;
   },
   { // pre
 
       if (!(argc == 3 &&
-	    enif_get_resource(env, argv[0], emdb_RESOURCE, (void**)&args->handle) &&
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle) &&
 	    enif_is_binary(env, argv[1]) &&
 	    enif_is_binary(env, argv[2]) )) {
 	  ASYNC_NIF_RETURN_BADARG();
       }
       if (!args->handle->env)
 	  ASYNC_NIF_RETURN_BADARG();
-      STAT_TICK(args->handle, emdb_put);
+      STAT_TICK(args->handle, lmdb_put);
       enif_keep_resource((void*)args->handle);
       args->key = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[1]);
       args->val = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[2]);
@@ -353,7 +354,7 @@ ASYNC_NIF_DECL(
 	  FAIL_ERR(ret, err1);
 
       CHECK(mdb_txn_commit(txn), err1);
-      STAT_TOCK(args->handle, emdb_put);
+      STAT_TOCK(args->handle, lmdb_put);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -377,24 +378,24 @@ ASYNC_NIF_DECL(
  * argv[2]    value as an Erlang binary
  */
 ASYNC_NIF_DECL(
-  emdb_update,
+  lmdb_update,
   { // struct
 
-      struct emdb *handle;
+      struct lmdb *handle;
       ERL_NIF_TERM key;
       ERL_NIF_TERM val;
   },
   { // pre
 
       if (!(argc == 3 &&
-	    enif_get_resource(env, argv[0], emdb_RESOURCE, (void**)&args->handle) &&
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle) &&
 	    enif_is_binary(env, argv[1]) &&
 	    enif_is_binary(env, argv[2]) )) {
 	  ASYNC_NIF_RETURN_BADARG();
       }
       if (!args->handle->env)
 	  ASYNC_NIF_RETURN_BADARG();
-      STAT_TICK(args->handle, emdb_upd);
+      STAT_TICK(args->handle, lmdb_upd);
       enif_keep_resource((void*)args->handle);
       args->key = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[1]);
       args->val = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[2]);
@@ -426,7 +427,7 @@ ASYNC_NIF_DECL(
       CHECK(mdb_txn_begin(args->handle->env, NULL, 0, & txn), err2);
       CHECK(mdb_put(txn, args->handle->dbi, &mkey, &mdata, 0), err1);
       CHECK(mdb_txn_commit(txn), err1);
-      STAT_TOCK(args->handle, emdb_upd);
+      STAT_TOCK(args->handle, lmdb_upd);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -449,22 +450,22 @@ ASYNC_NIF_DECL(
  * argv[1]    key as an Erlang binary
  */
 ASYNC_NIF_DECL(
-  emdb_get,
+  lmdb_get,
   { // struct
 
-      struct emdb *handle;
+      struct lmdb *handle;
       ERL_NIF_TERM key;
   },
   { // pre
 
       if (!(argc == 2 &&
-	    enif_get_resource(env, argv[0], emdb_RESOURCE, (void**)&args->handle) &&
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle) &&
 	    enif_is_binary(env, argv[1]) )) {
 	  ASYNC_NIF_RETURN_BADARG();
       }
       if (!args->handle->env)
 	  ASYNC_NIF_RETURN_BADARG();
-      STAT_TICK(args->handle, emdb_get);
+      STAT_TICK(args->handle, lmdb_get);
       enif_keep_resource((void*)args->handle);
       args->key = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[1]);
   },
@@ -504,7 +505,7 @@ ASYNC_NIF_DECL(
 	  FAIL_ERR(ENOMEM, err);
       memcpy(bin, mdata.mv_data, mdata.mv_size);
 
-      STAT_TOCK(args->handle, emdb_get);
+      STAT_TOCK(args->handle, lmdb_get);
       ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_OK, val));
       return;
 
@@ -525,22 +526,22 @@ ASYNC_NIF_DECL(
  * argv[1]    key as an Erlang binary
  */
 ASYNC_NIF_DECL(
-  emdb_del,
+  lmdb_del,
   { // struct
 
-      struct emdb *handle;
+      struct lmdb *handle;
       ERL_NIF_TERM key;
   },
   { // pre
 
       if (!(argc == 2 &&
-	    enif_get_resource(env, argv[0], emdb_RESOURCE, (void**)&args->handle) &&
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle) &&
 	    enif_is_binary(env, argv[1]) )) {
 	  ASYNC_NIF_RETURN_BADARG();
       }
       if (!args->handle->env)
 	  ASYNC_NIF_RETURN_BADARG();
-      STAT_TICK(args->handle, emdb_del);
+      STAT_TICK(args->handle, lmdb_del);
       enif_keep_resource((void*)args->handle);
       args->key = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[1]);
   },
@@ -570,7 +571,7 @@ ASYNC_NIF_DECL(
       }
 
       CHECK(mdb_txn_commit(txn), err);
-      STAT_TOCK(args->handle, emdb_del);
+      STAT_TOCK(args->handle, lmdb_del);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -590,15 +591,15 @@ ASYNC_NIF_DECL(
  * argv[0]    reference to the MDB handle resource
  */
 ASYNC_NIF_DECL(
-  emdb_drop,
+  lmdb_drop,
   { // struct
 
-      struct emdb *handle;
+      struct lmdb *handle;
   },
   { // pre
 
       if (!(argc == 1 &&
-	    enif_get_resource(env, argv[0], emdb_RESOURCE, (void**)&args->handle))) {
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle))) {
 	  ASYNC_NIF_RETURN_BADARG();
       }
       if (!args->handle->env)
@@ -631,20 +632,20 @@ ASYNC_NIF_DECL(
 
 
 
-static int emdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
+static int lmdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 {
     __UNUSED(load_info);
 
     ErlNifResourceFlags flags = ERL_NIF_RT_CREATE | ERL_NIF_RT_TAKEOVER;
 
-    struct emdb_priv_data *priv = enif_alloc(sizeof(struct emdb_priv_data));
+    struct lmdb_priv_data *priv = enif_alloc(sizeof(struct lmdb_priv_data));
     if (!priv)
         return ENOMEM;
-    memset(priv, 0, sizeof(struct emdb_priv_data));
+    memset(priv, 0, sizeof(struct lmdb_priv_data));
 
     /* Note: !!! the first element of our priv_data struct *must* be the
        pointer to the async_nif's private data which we set here. */
-    ASYNC_NIF_LOAD(emdb, priv->async_nif_priv);
+    ASYNC_NIF_LOAD(lmdb, priv->async_nif_priv);
     if (!priv)
         return ENOMEM;
     *priv_data = priv;
@@ -670,12 +671,12 @@ static int emdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     ATOM_INCOMPATIBLE = enif_make_atom(env, "incompatible");
     ATOM_BAD_RSLOT = enif_make_atom(env, "bad_rslot");
 
-    emdb_RESOURCE = enif_open_resource_type(env, NULL, "emdb_resource",
+    lmdb_RESOURCE = enif_open_resource_type(env, NULL, "lmdb_resource",
 					    NULL, flags, NULL);
     return (0);
 }
 
-static int emdb_reload(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM info)
+static int lmdb_reload(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM info)
 {
     __UNUSED(env);
     __UNUSED(priv_data);
@@ -684,39 +685,39 @@ static int emdb_reload(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM info)
 }
 
 
-static int emdb_upgrade(ErlNifEnv* env, void** priv_data, void** old_priv, ERL_NIF_TERM load_info)
+static int lmdb_upgrade(ErlNifEnv* env, void** priv_data, void** old_priv, ERL_NIF_TERM load_info)
 {
     __UNUSED(env);
     __UNUSED(priv_data);
     __UNUSED(old_priv);
     __UNUSED(load_info);
-    ASYNC_NIF_UPGRADE(emdb, env);
+    ASYNC_NIF_UPGRADE(lmdb, env);
     return (0); // TODO:
 }
 
 
-static void emdb_unload(ErlNifEnv* env, void* priv_data)
+static void lmdb_unload(ErlNifEnv* env, void* priv_data)
 {
-    struct emdb_priv_data *priv = (struct emdb_priv_data *)priv_data;
-    ASYNC_NIF_UNLOAD(emdb, env, priv->async_nif_priv);
+    struct lmdb_priv_data *priv = (struct lmdb_priv_data *)priv_data;
+    ASYNC_NIF_UNLOAD(lmdb, env, priv->async_nif_priv);
     enif_free(priv);
     return;
 }
 
 static ErlNifFunc nif_funcs [] = {
-    {"open",        4, emdb_open},
-    {"close",       2, emdb_close},
-    {"put",         4, emdb_put},
-    {"get",         3, emdb_get},
-    {"del",         3, emdb_del},
-    {"update",      4, emdb_update},
-    {"drop",        2, emdb_drop}
+    {"open",        4, lmdb_open},
+    {"close",       2, lmdb_close},
+    {"put",         4, lmdb_put},
+    {"get",         3, lmdb_get},
+    {"del",         3, lmdb_del},
+    {"update",      4, lmdb_update},
+    {"drop",        2, lmdb_drop}
 };
 
 /* driver entry point */
-ERL_NIF_INIT(emdb,
+ERL_NIF_INIT(lmdb,
              nif_funcs,
-             & emdb_load,
-             & emdb_reload,
-             & emdb_upgrade,
-             & emdb_unload)
+             & lmdb_load,
+             & lmdb_reload,
+             & lmdb_upgrade,
+             & lmdb_unload)

@@ -1,7 +1,7 @@
 %%-------------------------------------------------------------------
-%% This file is part of EMDB - Erlang MDB API
+%% This file is part of LMDB - Erlang Lightning MDB API
 %%
-%% Copyright (c) 2013 by Basho Technologies. All rights reserved.
+%% Copyright (c) 2013 by Basho Technologies, Inc. All rights reserved.
 %%
 %%-------------------------------------------------------------------
 %% Redistribution and use in source and binary forms, with or without
@@ -25,7 +25,7 @@
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 %%-------------------------------------------------------------------
 
--module(emdb_sup).
+-module(lmdb_sup).
 
 -behaviour(supervisor).
 
@@ -53,4 +53,4 @@ start_link() ->
 %% Supervisor callbacks
 %% ===================================================================
 init([]) ->
-    {ok, {{one_for_one, 5, 10}, [?CHILD(emdb, worker)]}}.
+    {ok, {{one_for_one, 5, 10}, [?CHILD(lmdb, worker)]}}.

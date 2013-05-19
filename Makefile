@@ -1,6 +1,4 @@
-# See LICENSE for licensing information.
-
-MODULE = emdb
+MODULE = lmdb
 
 DIALYZER = dialyzer
 REBAR = rebar
@@ -56,10 +54,10 @@ compile-for-triq:
 	@$(REBAR) -D QC -D QC_TRIQ compile triq compile_only=true
 
 plt: compile
-	@$(DIALYZER) --build_plt --output_plt .$(TARGET).plt -pa deps/lager/ebin --apps kernel stdlib
+	@$(DIALYZER) --build_plt --output_plt .$(TARGET).plt -pa --apps kernel stdlib
 
 analyze: compile
-	@$(DIALYZER) --plt .$(TARGET).plt -pa deps/lager/ebin ebin
+	@$(DIALYZER) --plt .$(TARGET).plt
 
 repl:
-	@$(ERL) -pa ebin -pz deps/lager/ebin
+	@$(ERL) exec erl -pa $PWD/ebin -pa +B
