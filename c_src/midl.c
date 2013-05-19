@@ -3,7 +3,7 @@
 /* $OpenLDAP$ */
 /* This work is part of OpenLDAP Software <http://www.openldap.org/>.
  *
- * Copyright 2000-2012 The OpenLDAP Foundation.
+ * Copyright 2000-2013 The OpenLDAP Foundation.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -18,6 +18,7 @@
 #include <limits.h>
 #include <string.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <sys/types.h>
 #include <assert.h>
 #include "midl.h"
@@ -59,7 +60,7 @@ static unsigned mdb_midl_search( MDB_IDL ids, MDB_ID id )
 			return cursor;
 		}
 	}
-	
+
 	if( val > 0 ) {
 		++cursor;
 	}
@@ -105,7 +106,7 @@ int mdb_midl_insert( MDB_IDL ids, MDB_ID id )
 			ids[2] = ids[ids[0]-1];
 		}
 		ids[0] = MDB_NOID;
-	
+
 	} else {
 		/* insert id */
 		for (i=ids[0]; i>x; i--)
@@ -117,22 +118,24 @@ int mdb_midl_insert( MDB_IDL ids, MDB_ID id )
 }
 #endif
 
-MDB_IDL mdb_midl_alloc()
+MDB_IDL mdb_midl_alloc(int num)
 {
-	MDB_IDL ids = malloc((MDB_IDL_UM_MAX+1) * sizeof(MDB_ID));
-	*ids++ = MDB_IDL_UM_MAX;
+	MDB_IDL ids = malloc((num+2) * sizeof(MDB_ID));
+	if (ids)
+		*ids++ = num;
 	return ids;
 }
 
 void mdb_midl_free(MDB_IDL ids)
 {
-	free(ids-1);
+	if (ids)
+		free(ids-1);
 }
 
 int mdb_midl_shrink( MDB_IDL *idp )
 {
 	MDB_IDL ids = *idp;
-	if (ids[-1] > MDB_IDL_UM_MAX) {
+	if (*(--ids) > MDB_IDL_UM_MAX) {
 		ids = realloc(ids, (MDB_IDL_UM_MAX+1) * sizeof(MDB_ID));
 		*ids++ = MDB_IDL_UM_MAX;
 		*idp = ids;
@@ -141,19 +144,26 @@ int mdb_midl_shrink( MDB_IDL *idp )
 	return 0;
 }
 
+int mdb_midl_grow( MDB_IDL *idp, int num )
+{
+	MDB_IDL idn = *idp-1;
+	/* grow it */
+	idn = realloc(idn, (*idn + num + 2) * sizeof(MDB_ID));
+	if (!idn)
+		return ENOMEM;
+	*idn++ += num;
+	*idp = idn;
+	return 0;
+}
+
 int mdb_midl_append( MDB_IDL *idp, MDB_ID id )
 {
 	MDB_IDL ids = *idp;
 	/* Too big? */
 	if (ids[0] >= ids[-1]) {
-		MDB_IDL idn = ids-1;
-		/* grow it */
-		idn = realloc(idn, (*idn + MDB_IDL_UM_MAX + 1) * sizeof(MDB_ID));
-		if (!idn)
-			return -1;
-		*idn++ += MDB_IDL_UM_MAX;
-		ids = idn;
-		*idp = ids;
+		if (mdb_midl_grow(idp, MDB_IDL_UM_MAX))
+			return ENOMEM;
+		ids = *idp;
 	}
 	ids[0]++;
 	ids[ids[0]] = id;
@@ -165,14 +175,9 @@ int mdb_midl_append_list( MDB_IDL *idp, MDB_IDL app )
 	MDB_IDL ids = *idp;
 	/* Too big? */
 	if (ids[0] + app[0] >= ids[-1]) {
-		MDB_IDL idn = ids-1;
-		/* grow it */
-		idn = realloc(idn, (*idn + app[-1]) * sizeof(MDB_ID));
-		if (!idn)
-			return -1;
-		*idn++ += app[-1];
-		ids = idn;
-		*idp = ids;
+		if (mdb_midl_grow(idp, app[0]))
+			return ENOMEM;
+		ids = *idp;
 	}
 	memcpy(&ids[ids[0]+1], &app[1], app[0] * sizeof(MDB_ID));
 	ids[0] += app[0];
@@ -192,7 +197,7 @@ mdb_midl_sort( MDB_IDL ids )
 	int i,j,k,l,ir,jstack;
 	MDB_ID a, itmp;
 
-	ir = ids[0];
+	ir = (int)ids[0];
 	l = 1;
 	jstack = 0;
 	for(;;) {
@@ -232,7 +237,7 @@ mdb_midl_sort( MDB_IDL ids )
 			ids[l+1] = ids[j];
 			ids[j] = a;
 			jstack += 2;
-			if (ir-i+1 >= j-1) {
+			if (ir-i+1 >= j-l) {
 				istack[jstack] = ir;
 				istack[jstack-1] = i;
 				ir = j-1;
@@ -255,7 +260,7 @@ unsigned mdb_mid2l_search( MDB_ID2L ids, MDB_ID id )
 	unsigned base = 0;
 	unsigned cursor = 1;
 	int val = 0;
-	unsigned n = ids[0].mid;
+	unsigned n = (unsigned)ids[0].mid;
 
 	while( 0 < n ) {
 		unsigned pivot = n >> 1;
@@ -304,7 +309,7 @@ int mdb_mid2l_insert( MDB_ID2L ids, MDB_ID2 *id )
 	} else {
 		/* insert id */
 		ids[0].mid++;
-		for (i=ids[0].mid; i>x; i--)
+		for (i=(unsigned)ids[0].mid; i>x; i--)
 			ids[i] = ids[i-1];
 		ids[x] = *id;
 	}
@@ -325,3 +330,5 @@ int mdb_mid2l_append( MDB_ID2L ids, MDB_ID2 *id )
 
 /** @} */
 /** @} */
+
+/* http://gitorious.org/mdb/mdb/blobs/raw/mdb.master/libraries/liblmdb/midl.c */
