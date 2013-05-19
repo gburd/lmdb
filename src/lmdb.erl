@@ -1,7 +1,8 @@
 %%-------------------------------------------------------------------
-%% This file is part of EMDB - Erlang MDB API
+%% This file is part of LMDB - Erlang Lightning MDB API
 %%
 %% Copyright (c) 2012 by Aleph Archives. All rights reserved.
+%% Copyright (c) 2013 by Basho Technologies, Inc. All rights reserved.
 %%
 %%-------------------------------------------------------------------
 %% Redistribution and use in source and binary forms, with or without
@@ -25,7 +26,7 @@
 %% OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 %%-------------------------------------------------------------------
 
--module(emdb).
+-module(lmdb).
 
 %%====================================================================
 %% EXPORTS
@@ -52,7 +53,7 @@
 %% config for testing
 -ifdef(TEST).
 -ifdef(EQC).
-%include_lib("eqc/include/eqc.hrl").
+include_lib("eqc/include/eqc.hrl").
 -define(QC_OUT(P), eqc:on_output(fun(Str, Args) -> io:format(user, Str, Args) end, P)).
 -endif.
 -include_lib("eunit/include/eunit.hrl").
@@ -61,15 +62,15 @@
 %%====================================================================
 %% Includes
 %%====================================================================
--include("emdb.hrl").
+-include("lmdb.hrl").
 -include("async_nif.hrl").
 
 %%====================================================================
 %% MACROS
 %%====================================================================
--define(EMDB_DRIVER_NAME, "emdb").
+-define(LMDB_DRIVER_NAME, "lmdb").
 -define(NOT_LOADED, not_loaded(?LINE)).
--define(MDB_MAP_SIZE, 10485760). %% 10MB
+-define(MDB_MAP_SIZE, 2147483648). %% 2GB in bytes
 
 %%====================================================================
 %% PUBLIC API
@@ -155,7 +156,7 @@ init() ->
         Path ->
             Path
     end,
-    erlang:load_nif(filename:join(PrivDir, ?EMDB_DRIVER_NAME), 0).
+    erlang:load_nif(filename:join(PrivDir, ?LMDB_DRIVER_NAME), 0).
 
 
 %%--------------------------------------------------------------------
