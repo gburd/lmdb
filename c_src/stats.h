@@ -71,7 +71,7 @@ static unsigned int __log2_64(uint64_t x) {
      static inline double name ## _stat_mean(struct name ## _stat *s) { \
          uint32_t t = s->h;                                             \
          uint32_t h = (s->h + 1) % nsamples;                            \
-         double mean = 0;                                               \
+         double mean = 0.0;						\
          while (h != t) {                                               \
              mean += s->samples[h];                                     \
              h = (h + 1) % nsamples;                                    \

@@ -178,6 +178,10 @@ __strerror_term(ErlNifEnv* env, int err)
 /**
  * Opens a MDB database.
  *
+ * Note: mdb_dbi_open() must not be called from multiple concurrent
+ * transactions. A transaction that uses this function must finish (either
+ * commit or abort) before any other transaction may use this function.
+ *
  * argv[0]    path to directory for the database files
  * argv[1]    size of database
  * argv[2]    flags
@@ -250,6 +254,13 @@ ASYNC_NIF_DECL(
 
 /**
  * Closes a MDB database.
+ *
+ * The old database handle is returned if the database was already open.
+ * The handle must only be closed once.
+ * This call is not mutex protected. Handles should only be closed by
+ * a single thread, and only if no other threads are going to reference
+ * the database handle or one of its cursors any further. Do not close
+ * a handle if an existing transaction has modified its database.
  *
  * argv[0]    reference to the MDB handle resource
  */
@@ -705,13 +716,36 @@ static void lmdb_unload(ErlNifEnv* env, void* priv_data)
 }
 
 static ErlNifFunc nif_funcs [] = {
-    {"open",        4, lmdb_open},
-    {"close",       2, lmdb_close},
-    {"put",         4, lmdb_put},
-    {"get",         3, lmdb_get},
-    {"del",         3, lmdb_del},
-    {"update",      4, lmdb_update},
-    {"drop",        2, lmdb_drop}
+    {"env_open"       4, lmdb_env_open},     // [(Ref), Path, Bitmask, Mode]
+    {"copy",          3, lmdb_copy},         // [(Ref), Env, Path]
+    {"stat",          2, lmdb_stat},         // [(Ref), Env]
+    {"sync",          3, lmdb_sync},         // [(Ref), Env, Force]
+    {"env_close",     2, lmdb_env_close},    // [(Ref), Env]
+    {"path",          2, lmdb_path},         // [(Ref), Env]
+    {"set_maxdbs",    3, lmdb_set_maxdbs},   // [(Ref), Env, Dbs]
+    {"txn_begin",     4, lmdb_txn_begin},    // [(Ref), Env, Parent, Bitmask]);
+    {"txn_commit",    2, lmdb_txn_commit},   // [(Ref), Txn]
+    {"txn_abort",     2, lmdb_txn_abort},    // [(Ref), Txn]
+    {"txn_reset",     2, lmdb_txn_reset},    // [(Ref), Txn]
+    {"txn_renew",     2, lmdb_txn_renew},    // [(Ref), Txn]
+    {"dbi_open",      5, lmdb_dbi_open},     // [(Ref), Txn, Path, Size, Bitmask]
+    {"dbi_close",     2, lmdb_dbi_close},    // [(Ref), Env, Dbi]
+    {"drop",          4, lmdb_drop},         // [(Ref), Txn, Dbi, Delete]
+    {"get",           3, lmdb_get},          // [(Ref), Txn, Dbi, Key]
+    {"put",           4, lmdb_put},          // [(Ref), Txn, Dbi, Key, Value, Bitmask]
+    {"del",           5, lmdb_del},          // [(Ref), Txn, Dbi, Key, Value]
+    {"cursor_open",   3, lmdb_cursor_open},  // [(Ref), Txn, Dbi]
+    {"cursor_close",  2, lmdb_cursor_close}, // [(Ref), Cursor]
+    {"cursor_renew",  3, lmdb_cursor_renew}, // [(Ref), Txn, Cursor]
+    {"cursor_txn",    2, lmdb_cursor_txn},   // [(Ref), Cursor]
+    {"cursor_dbi",    2, lmdb_cursor_dbi},   // [(Ref), Cursor]
+    {"cursor_get",    5, lmdb_cursor_get},   // [(Ref), Cursor, Key, DupValue, CursorOp]
+    {"cursor_put",    5, lmdb_cursor_put},   // [(Ref), Cursor, Key, Value, Options]
+    {"cursor_del",    3, lmdb_cursor_del},   // [(Ref), Cursor, Bitmask]
+    {"cursor_count",  2, lmdb_cursor_count}, // [(Ref), Cursor]
+    {"cmp",           5, lmdb_cmp},          // [(Ref), Txn, Dbi, A, B]
+    {"dup_cmp",       5, lmdb_dup_cmp},      // [(Ref), Txn, Dbi, A, B]
+    {"version",       1, lmdb_version}       // [(Ref)]
 };
 
 /* driver entry point */
