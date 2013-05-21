@@ -49,8 +49,8 @@ extern "C" {
 } while (0)
 #endif
 
-#ifndef __UNUSED
-#define __UNUSED(v) ((void)(v))
+#ifndef UNUSED
+#define UNUSED(v) ((void)(v))
 #endif
 
 

@@ -33,7 +33,7 @@
 %%====================================================================
 
 %% Public API:
--export([env_open/3,
+-export([env_open/3, env_open/6,
          env_close/1,
          copy/2,
          stat/1,
@@ -131,7 +131,7 @@
 		     prev | prev_dup | prev_multiple | prev_nodup |
 		     set | set_key | set_range.
 -type path() :: string().
--type mode() :: string().
+-type mode() :: non_neg_integer().
 -type byte_size() :: non_neg_integer() | { non_neg_integer(),
                        b|bytes|'GB'|'GiB'|'TB'|'TiB'|'PB'|'PiB' }.
 
@@ -145,59 +145,62 @@
 %% If this function fails, env_close() must be called to discard the
 %% reference.
 %%
-%% path        The directory in which the database files reside. This
-%%             directory must already exist and be writable.
+%% path      The directory in which the database files reside. This
+%%           directory must already exist and be writable.
 %%
-%% flags       Special options for this environment. This parameter
-%%             must be set to zero or more of the values described here.
+%% flags     Special options for this environment. This parameter
+%%           must be set to zero or more of the values described here.
 %%
 %%      fixedmap - Use a fixed address for the mmap region.
 %%      nosubdir - By default, LMDB creates its environment in a directory whose
-%%              pathname is given in \b path, and creates its data and lock files
-%%              under that directory. With this option, \b path is used as-is for
-%%              the database main data file. The database lock file is the \b path
-%%              with "-lock" appended.
+%%            pathname is given in \b path, and creates its data and lock files
+%%            under that directory. With this option, \b path is used as-is for
+%%            the database main data file. The database lock file is the \b path
+%%            with "-lock" appended.
 %%      rdonly - Open the environment in read-only mode. No write operations will be
-%%              allowed. LMDB will still modify the lock file - except on read-only
-%%              filesystems, where LMDB does not use locks.
+%%            allowed. LMDB will still modify the lock file - except on read-only
+%%            filesystems, where LMDB does not use locks.
 %%      writemap - Use a writeable memory map unless MDB_RDONLY is set. This is faster
-%%              and uses fewer mallocs, but loses protection from application bugs
-%%              like wild pointer writes and other bad updates into the database.
-%%              Incompatible with nested transactions.
+%%            and uses fewer mallocs, but loses protection from application bugs
+%%            like wild pointer writes and other bad updates into the database.
+%%            Incompatible with nested transactions.
 %%      nometasync - Flush system buffers to disk only once per transaction, omit the
-%%              metadata flush. Defer that until the system flushes files to disk,
-%%              or next non-LMDB_RDONLY commit or sync(). This optimization
-%%              maintains database integrity, but a system crash may undo the last
-%%              one or more committed transaction. I.e. this option preserves the
-%%              ACI (atomicity, consistency, isolation) but not D (durability)
-%%              database transaction properties.
+%%            metadata flush. Defer that until the system flushes files to disk,
+%%            or next non-LMDB_RDONLY commit or sync(). This optimization
+%%            maintains database integrity, but a system crash may undo the last
+%%            one or more committed transaction. I.e. this option preserves the
+%%            ACI (atomicity, consistency, isolation) but not D (durability)
+%%            database transaction properties.
 %%      nosync - Don't flush system buffers to disk when committing a transaction.
-%%              This optimization means a system crash can corrupt the database or
-%%              lose the last transactions if buffers are not yet flushed to disk.
-%%              The risk is governed by how often the system flushes dirty buffers
-%%              to disk and how often sync() is called.  However, if the filesystem
-%%              preserves write order and the `writemap` flag is not used,
-%%              transactions exhibit ACI (atomicity, consistency, isolation)
-%%              properties and only lose D (durability).  I.e. database integrity
-%%              is maintained, but a system crash may undo the final transactions.
-%%              Note that using [nosync, writemap] togher leaves the system with no
-%%              hint for when to write transactions to disk, unless sync()
-%%              is called. [mapsync, writemap] may be preferable.
+%%            This optimization means a system crash can corrupt the database or
+%%            lose the last transactions if buffers are not yet flushed to disk.
+%%            The risk is governed by how often the system flushes dirty buffers
+%%            to disk and how often sync() is called.  However, if the filesystem
+%%            preserves write order and the `writemap` flag is not used,
+%%            transactions exhibit ACI (atomicity, consistency, isolation)
+%%            properties and only lose D (durability).  I.e. database integrity
+%%            is maintained, but a system crash may undo the final transactions.
+%%            Note that using [nosync, writemap] togher leaves the system with no
+%%            hint for when to write transactions to disk, unless sync()
+%%            is called. [mapsync, writemap] may be preferable.
 %%      mapsync - When using `writemap`, use asynchronous flushes to disk.
-%%              As with `nosync`, a system crash can then corrupt the database
-%%              or lose the last transactions. Calling sync() ensures on-disk
-%%              database integrity until next commit.
+%%            As with `nosync`, a system crash can then corrupt the database
+%%            or lose the last transactions. Calling sync() ensures on-disk
+%%            database integrity until next commit.
 %%      notls - Don't use Thread-Local Storage. Tie reader locktable slots to
-%%              txn objects instead of to threads. I.e. txn_reset() keeps the
-%%              slot reseved for the txn object. A thread may use parallel
-%%              read-only transactions. A read-only transaction may span threads if
-%%              the user synchronizes its use. Applications that multiplex many
-%%              user threads over individual OS threads need this option. Such an
-%%              application must also serialize the write transactions in an OS
-%%              thread, since MDB's write locking is unaware of the user threads.
+%%            txn objects instead of to threads. I.e. txn_reset() keeps the
+%%            slot reseved for the txn object. A thread may use parallel
+%%            read-only transactions. A read-only transaction may span threads if
+%%            the user synchronizes its use. Applications that multiplex many
+%%            user threads over individual OS threads need this option. Such an
+%%            application must also serialize the write transactions in an OS
+%%            thread, since MDB's write locking is unaware of the user threads.
 %%
-%% mode         The UNIX permissions to set on created files. This parameter
-%%              is ignored on Windows.
+%% mode       The UNIX permissions to set on created files. This parameter
+%%            is ignored on Windows.
+%% mapsize
+%% maxreaders
+%% maxdbs
 %%
 %% Possible errors are:
 %%      MDB_VERSION_MISMATCH - the version of the MDB library doesn't match the
@@ -210,7 +213,11 @@
 %%--------------------------------------------------------------------
 
 -spec env_open(path(), options(), mode()) -> {ok, env()} | {error, term()}.
+-spec env_open(path(), options(), mode(), non_neg_integer(),
+	       non_neg_integer(), non_neg_integer()) -> {ok, env()} | {error, term()}.
 env_open(Path, Options, Mode) ->
+    env_open(Path, Options, Mode, {2, 'GB'}, 1000, 100). % guess at default values
+env_open(Path, Options, Mode, MapSize, MaxReaders, MaxDbs) ->
     ValidOptions = [{ fixedmap, ?MDB_FIXEDMAP, []},
                     { nosubdir, ?MDB_NOSUBDIR, []},
                     { rdonly, ?MDB_RDONLY, [writemap]},
@@ -223,12 +230,14 @@ env_open(Path, Options, Mode) ->
         {ok, Bitmask} ->
             %% Ensure directory exists
             ok = filelib:ensure_dir(filename:join([Path, "x"])),
-            ?ASYNC_NIF_CALL(fun env_open_nif/4, [Path, Bitmask, Mode]);
+            ?ASYNC_NIF_CALL(fun env_open_nif/7, [Path, Bitmask, Mode,
+						 in_bytes(MapSize), MaxReaders,
+						 MaxDbs]);
         {error, _Reason}=Error ->
             Error
     end.
 
-env_open_nif(_AsyncRef, _Path, _Options, _Mode) ->
+env_open_nif(_AsyncRef, _Path, _Options, _Mode, _MapSize, _MaxReaders, _MaxDbs) ->
     ?NOT_LOADED.
 
 %%--------------------------------------------------------------------
