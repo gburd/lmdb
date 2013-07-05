@@ -2,7 +2,7 @@
  * This file is part of LMDB - Erlang Lightning MDB API
  *
  * Copyright (c) 2012 by Aleph Archives. All rights reserved.
- * Copyright (c) 2013 by Basho Technologies, Inc. All rights reserved.
+%% Copyright (c) 2013 by Basho Technologies, Inc. All rights reserved.
  *
  * -------------------------------------------------------------------------
  * Redistribution and use in source and binary forms, with or without
@@ -28,6 +28,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <inttypes.h>
 #include <errno.h>
 #include <sys/param.h>
 #include <erl_nif.h>
@@ -35,25 +36,12 @@
 
 #include "common.h"
 #include "async_nif.h"
-#include "stats.h"
 #include "lmdb.h"
 
-STAT_DECL(lmdb_env_get, 1000);
-STAT_DECL(lmdb_env_put, 1000);
-STAT_DECL(lmdb_env_del, 1000);
-STAT_DECL(lmdb_env_upd, 1000);
 
-static ErlNifResourceType *lmdb_env_RESOURCE;
-struct lmdb_env {
+static ErlNifResourceType *lmdb_RESOURCE;
+struct lmdb {
     MDB_env *env;
-    STAT_DEF(lmdb_env_get);
-    STAT_DEF(lmdb_env_put);
-    STAT_DEF(lmdb_env_del);
-    STAT_DEF(lmdb_env_upd);
-};
-
-static ErlNifResourceType *lmdb_dbi_RESOURCE;
-struct lmdb_dbi {
     MDB_dbi dbi;
 };
 
@@ -68,7 +56,6 @@ struct lmdb_cursor {
 };
 
 KHASH_MAP_INIT_PTR(envs, struct lmdb_env*);
-
 struct lmdb_priv_data {
     void *async_nif_priv; // Note: must be first element in struct
     khash_t(envs) *envs; // TODO: could just be a list
@@ -397,7 +384,6 @@ ASYNC_NIF_DECL(
       ErlNifUInt64 envflags;
   },
   { // pre
-
       if (!(argc == 3 &&
 	    enif_is_list(env, argv[0]) &&
 	    enif_is_number(env, argv[1]) &&
@@ -420,11 +406,6 @@ ASYNC_NIF_DECL(
       if ((handle = enif_alloc_resource(lmdb_RESOURCE, sizeof(struct lmdb))) == NULL)
 	  FAIL_ERR(ENOMEM, err3);
       enif_release_resource(handle);
-
-      STAT_INIT(handle, lmdb_get);
-      STAT_INIT(handle, lmdb_put);
-      STAT_INIT(handle, lmdb_upd);
-      STAT_INIT(handle, lmdb_del);
 
       CHECK(mdb_env_create(&(handle->env)), err2);
 
@@ -486,15 +467,7 @@ ASYNC_NIF_DECL(
   },
   { // work
 
-      STAT_PRINT(args->handle, lmdb_get, "lmdb");
-      STAT_PRINT(args->handle, lmdb_put, "lmdb");
-      STAT_PRINT(args->handle, lmdb_del, "lmdb");
-      STAT_PRINT(args->handle, lmdb_upd, "lmdb");
       mdb_env_close(args->handle->env);
-      STAT_RESET(args->handle, lmdb_get);
-      STAT_RESET(args->handle, lmdb_put);
-      STAT_RESET(args->handle, lmdb_del);
-      STAT_RESET(args->handle, lmdb_upd);
       args->handle->env = NULL;
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
@@ -530,7 +503,6 @@ ASYNC_NIF_DECL(
       }
       if (!args->handle->env)
 	  ASYNC_NIF_RETURN_BADARG();
-      STAT_TICK(args->handle, lmdb_put);
       enif_keep_resource((void*)args->handle);
       args->key = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[1]);
       args->val = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[2]);
@@ -569,7 +541,6 @@ ASYNC_NIF_DECL(
 	  FAIL_ERR(ret, err1);
 
       CHECK(mdb_txn_commit(txn), err1);
-      STAT_TOCK(args->handle, lmdb_put);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -610,7 +581,6 @@ ASYNC_NIF_DECL(
       }
       if (!args->handle->env)
 	  ASYNC_NIF_RETURN_BADARG();
-      STAT_TICK(args->handle, lmdb_upd);
       enif_keep_resource((void*)args->handle);
       args->key = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[1]);
       args->val = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[2]);
@@ -642,7 +612,6 @@ ASYNC_NIF_DECL(
       CHECK(mdb_txn_begin(args->handle->env, NULL, 0, & txn), err2);
       CHECK(mdb_put(txn, args->handle->dbi, &mkey, &mdata, 0), err1);
       CHECK(mdb_txn_commit(txn), err1);
-      STAT_TOCK(args->handle, lmdb_upd);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -680,7 +649,6 @@ ASYNC_NIF_DECL(
       }
       if (!args->handle->env)
 	  ASYNC_NIF_RETURN_BADARG();
-      STAT_TICK(args->handle, lmdb_get);
       enif_keep_resource((void*)args->handle);
       args->key = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[1]);
   },
@@ -720,7 +688,6 @@ ASYNC_NIF_DECL(
 	  FAIL_ERR(ENOMEM, err);
       memcpy(bin, mdata.mv_data, mdata.mv_size);
 
-      STAT_TOCK(args->handle, lmdb_get);
       ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_OK, val));
       return;
 
@@ -756,7 +723,6 @@ ASYNC_NIF_DECL(
       }
       if (!args->handle->env)
 	  ASYNC_NIF_RETURN_BADARG();
-      STAT_TICK(args->handle, lmdb_del);
       enif_keep_resource((void*)args->handle);
       args->key = enif_make_copy(ASYNC_NIF_WORK_ENV, argv[1]);
   },
@@ -786,7 +752,6 @@ ASYNC_NIF_DECL(
       }
 
       CHECK(mdb_txn_commit(txn), err);
-      STAT_TOCK(args->handle, lmdb_del);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -844,6 +809,7 @@ ASYNC_NIF_DECL(
 
     enif_release_resource((void*)args->handle);
   });
+
 
 
 /**
@@ -906,7 +872,6 @@ lmdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     fprintf(stderr, "NIF on_load complete (lmdb version: %s)", MDB_VERSION_STRING);
     fflush(stderr);
     return (0);
-
 err3:
     kh_destroy(envs, priv->envs);
 err2:
@@ -915,7 +880,6 @@ err2:
 err1:
     return (ENOMEM);
 }
-
 
 /**
  * TODO:
@@ -926,7 +890,7 @@ lmdb_reload(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM info)
     UNUSED(env);
     UNUSED(priv_data);
     UNUSED(info);
-    return (0); // TODO: implement
+    return (0); // TODO:
 }
 
 

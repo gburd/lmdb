@@ -65,6 +65,7 @@
 	 dcmp/4,
 	 lmdb_lib_version/0 ]).
 
+
 %% internal export (ex. spawn, apply)
 -on_load(init/0).
 
@@ -80,6 +81,7 @@
 %%====================================================================
 %% Includes
 %%====================================================================
+
 -include("async_nif.hrl").
 
 %%====================================================================
@@ -1122,7 +1124,6 @@ lmdb_lib_version_nif(_AsyncRef) ->
 %%====================================================================
 %% PRIVATE API
 %%====================================================================
-
 %%--------------------------------------------------------------------
 %% @doc
 %% @end
@@ -1268,8 +1269,8 @@ open_test_db() ->
     ?assertMatch(ok, filelib:ensure_dir(filename:join([DataDir, "x"]))),
     {ok, Handle} = ?MODULE:open(DataDir, 2147483648),
     [?MODULE:upd(Handle, crypto:sha(<<X>>),
-                 crypto:rand_bytes(crypto:rand_uniform(128, 4096))) ||
-        X <- lists:seq(1, 100)],
+		 crypto:rand_bytes(crypto:rand_uniform(128, 4096))) ||
+	X <- lists:seq(1, 100)],
     Handle.
 
 basics_test_() ->
@@ -1342,7 +1343,7 @@ prop_put_delete() ->
          ?FORALL(Ops, eqc_gen:non_empty(list(ops(Keys, Values))),
                  begin
                      {ok, CWD} = file:get_cwd(),
-                     DataDir = filename:join([CWD, "test", "eqc"]),
+		     DataDir = filename:join([CWD, "test", "eqc"]),
                      ?cmd("rm -rf " ++ DataDir),
                      ok = filelib:ensure_dir(filename:join([DataDir, "x"])),
                      {ok, Handle} = ?MODULE:open(DataDir, 2147483648),
