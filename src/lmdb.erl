@@ -179,7 +179,7 @@ open_test_db() ->
     {ok, Handle} = ?MODULE:open(DataDir, 2147483648),
     [?MODULE:upd(Handle, crypto:sha(<<X>>),
 		 crypto:rand_bytes(crypto:rand_uniform(128, 4096))) ||
-	X <- lists:seq(1, 100)],
+	X <- lists:seq(1, 10)],
     Handle.
 
 basics_test_() ->
