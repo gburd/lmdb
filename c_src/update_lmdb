@@ -1,0 +1,6 @@
+#!/bin/sh
+
+http://www.openldap.org/devel/gitweb.cgi?p=openldap.git;a=blob_plain;f=libraries/liblmdb/mdb.c;hb=HEAD
+http://www.openldap.org/devel/gitweb.cgi?p=openldap.git;a=blob_plain;f=libraries/liblmdb/lmdb.h;hb=HEAD
+http://www.openldap.org/devel/gitweb.cgi?p=openldap.git;a=blob_plain;f=libraries/liblmdb/midl.c;hb=HEAD
+http://www.openldap.org/devel/gitweb.cgi?p=openldap.git;a=blob_plain;f=libraries/liblmdb/midl.h;hb=HEAD
