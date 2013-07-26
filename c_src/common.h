@@ -42,8 +42,8 @@ extern "C" {
 #define DPUTS(arg)		((void) 0)
 #endif
 
-#ifndef __UNUSED
-#define __UNUSED(v) ((void)(v))
+#ifndef UNUSED
+#define UNUSED(v) ((void)(v))
 #endif
 #ifndef COMPQUIET
 #define COMPQUIET(n, v) do {                                            \
