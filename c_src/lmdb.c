@@ -2949,6 +2949,19 @@ mdb_env_init_meta(MDB_env *env, MDB_meta *meta)
 	MDB_page *p, *q;
 	int rc;
 	unsigned int	 psize;
+#ifdef _WIN32
+	DWORD len;
+	OVERLAPPED ov;
+	memset(&ov, 0, sizeof(ov));
+#define DO_PWRITE(rc, fd, ptr, size, len, pos)	do { \
+	ov.Offset = pos;	\
+	rc = WriteFile(fd, ptr, size, &len, &ov);	} while(0)
+#else
+	unsigned int len;
+#define DO_PWRITE(rc, fd, ptr, size, len, pos)	do { \
+	len = pwrite(fd, ptr, size, pos);	\
+	rc = (len >= 0); } while(0)
+#endif
 
 	DPUTS("writing new meta page");
 
@@ -2974,18 +2987,13 @@ mdb_env_init_meta(MDB_env *env, MDB_meta *meta)
 	q->mp_flags = P_META;
 	*(MDB_meta *)METADATA(q) = *meta;
 
-#ifdef _WIN32
-	{
-		DWORD len;
-		OVERLAPPED ov;
-		memset(&ov, 0, sizeof(ov));
-		rc = WriteFile(env->me_fd, p, psize * 2, &len, &ov);
-		rc = rc ? (len == psize * 2 ? MDB_SUCCESS : EIO) : ErrCode();
-	}
-#else
-	rc = pwrite(env->me_fd, p, psize * 2, 0);
-	rc = (rc == (int)psize * 2) ? MDB_SUCCESS : rc < 0 ? ErrCode() : EIO;
-#endif
+	DO_PWRITE(rc, env->me_fd, p, psize * 2, len, 0);
+	if (!rc)
+		rc = ErrCode();
+	else if (len == psize * 2)
+		rc = MDB_SUCCESS;
+	else
+		rc = ENOSPC;
 	free(p);
 	return rc;
 }
@@ -3535,19 +3543,34 @@ mdb_hash_val(MDB_val *val, mdb_hash_t hval)
 	return hval;
 }
 
-/** Hash the string and output the hash in hex.
+/** Hash the string and output the encoded hash.
+ * This uses modified RFC1924 Ascii85 encoding to accommodate systems with
+ * very short name limits. We don't care about the encoding being reversible,
+ * we just want to preserve as many bits of the input as possible in a
+ * small printable string.
  * @param[in] str string to hash
- * @param[out] hexbuf an array of 17 chars to hold the hash
+ * @param[out] encbuf an array of 11 chars to hold the hash
  */
+const static char mdb_a85[]= "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
 static void
-mdb_hash_hex(MDB_val *val, char *hexbuf)
+mdb_pack85(unsigned long l, char *out)
 {
 	int i;
-	mdb_hash_t h = mdb_hash_val(val, MDB_HASH_INIT);
-	for (i=0; i<8; i++) {
-		hexbuf += sprintf(hexbuf, "%02x", (unsigned int)h & 0xff);
-		h >>= 8;
+	for (i=0; i<5; i++) {
+		*out++ = mdb_a85[l % 85];
+		l /= 85;
 	}
+}
+
+static void
+mdb_hash_enc(MDB_val *val, char *encbuf)
+{
+	mdb_hash_t h = mdb_hash_val(val, MDB_HASH_INIT);
+	unsigned long *l = (unsigned long *)&h;
+
+	mdb_pack85(l[0], encbuf);
+	mdb_pack85(l[1], encbuf+5);
+	encbuf[10] = '\0';
 }
 #endif
 
@@ -3661,7 +3684,7 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 			DWORD nlow;
 		} idbuf;
 		MDB_val val;
-		char hexbuf[17];
+		char encbuf[11];
 
 		if (!mdb_sec_inited) {
 			InitializeSecurityDescriptor(&mdb_null_sd,
@@ -3678,9 +3701,9 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 		idbuf.nlow   = stbuf.nFileIndexLow;
 		val.mv_data = &idbuf;
 		val.mv_size = sizeof(idbuf);
-		mdb_hash_hex(&val, hexbuf);
-		sprintf(env->me_txns->mti_rmname, "Global\\MDBr%s", hexbuf);
-		sprintf(env->me_txns->mti_wmname, "Global\\MDBw%s", hexbuf);
+		mdb_hash_enc(&val, encbuf);
+		sprintf(env->me_txns->mti_rmname, "Global\\MDBr%s", encbuf);
+		sprintf(env->me_txns->mti_wmname, "Global\\MDBw%s", encbuf);
 		env->me_rmutex = CreateMutex(&mdb_all_sa, FALSE, env->me_txns->mti_rmname);
 		if (!env->me_rmutex) goto fail_errno;
 		env->me_wmutex = CreateMutex(&mdb_all_sa, FALSE, env->me_txns->mti_wmname);
@@ -3692,16 +3715,22 @@ mdb_env_setup_locks(MDB_env *env, char *lpath, int mode, int *excl)
 			ino_t ino;
 		} idbuf;
 		MDB_val val;
-		char hexbuf[17];
+		char encbuf[11];
 
+#if defined(__NetBSD__)
+#define	MDB_SHORT_SEMNAMES	1	/* limited to 14 chars */
+#endif
 		if (fstat(env->me_lfd, &stbuf)) goto fail_errno;
 		idbuf.dev = stbuf.st_dev;
 		idbuf.ino = stbuf.st_ino;
 		val.mv_data = &idbuf;
 		val.mv_size = sizeof(idbuf);
-		mdb_hash_hex(&val, hexbuf);
-		sprintf(env->me_txns->mti_rmname, "/MDBr%s", hexbuf);
-		sprintf(env->me_txns->mti_wmname, "/MDBw%s", hexbuf);
+		mdb_hash_enc(&val, encbuf);
+#ifdef MDB_SHORT_SEMNAMES
+		encbuf[9] = '\0';	/* drop name from 15 chars to 14 chars */
+#endif
+		sprintf(env->me_txns->mti_rmname, "/MDBr%s", encbuf);
+		sprintf(env->me_txns->mti_wmname, "/MDBw%s", encbuf);
 		/* Clean up after a previous run, if needed:  Try to
 		 * remove both semaphores before doing anything else.
 		 */
@@ -3984,6 +4013,14 @@ mdb_env_copyfd(MDB_env *env, HANDLE fd)
 	int rc;
 	size_t wsize;
 	char *ptr;
+#ifdef _WIN32
+	DWORD len, w2;
+#define DO_WRITE(rc, fd, ptr, w2, len)	rc = WriteFile(fd, ptr, w2, &len, NULL)
+#else
+	ssize_t len;
+	size_t w2;
+#define DO_WRITE(rc, fd, ptr, w2, len)	len = write(fd, ptr, w2); rc = (len >= 0)
+#endif
 
 	/* Do the lock/unlock of the reader mutex before starting the
 	 * write txn.  Otherwise other read txns could block writers.
@@ -4007,52 +4044,50 @@ mdb_env_copyfd(MDB_env *env, HANDLE fd)
 	}
 
 	wsize = env->me_psize * 2;
-#ifdef _WIN32
-	{
-		DWORD len;
-		rc = WriteFile(fd, env->me_map, wsize, &len, NULL);
-		rc = rc ? (len == wsize ? MDB_SUCCESS : EIO) : ErrCode();
+	ptr = env->me_map;
+	w2 = wsize;
+	while (w2 > 0) {
+		DO_WRITE(rc, fd, ptr, w2, len);
+		if (!rc) {
+			rc = ErrCode();
+			break;
+		} else if (len > 0) {
+			rc = MDB_SUCCESS;
+			ptr += len;
+			w2 -= len;
+			continue;
+		} else {
+			/* Non-blocking or async handles are not supported */
+			rc = EIO;
+			break;
 	}
-#else
-	rc = write(fd, env->me_map, wsize);
-	rc = rc == (int)wsize ? MDB_SUCCESS : rc < 0 ? ErrCode() : EIO;
-#endif
+	}
 	if (env->me_txns)
 		UNLOCK_MUTEX_W(env);
 
 	if (rc)
 		goto leave;
 
-	ptr = env->me_map + wsize;
 	wsize = txn->mt_next_pgno * env->me_psize - wsize;
-#ifdef _WIN32
 	while (wsize > 0) {
-		DWORD len, w2;
 		if (wsize > MAX_WRITE)
 			w2 = MAX_WRITE;
 		else
 			w2 = wsize;
-		rc = WriteFile(fd, ptr, w2, &len, NULL);
-		rc = rc ? (len == w2 ? MDB_SUCCESS : EIO) : ErrCode();
-		if (rc) break;
-		wsize -= w2;
-		ptr += w2;
+		DO_WRITE(rc, fd, ptr, w2, len);
+		if (!rc) {
+			rc = ErrCode();
+			break;
+		} else if (len > 0) {
+			rc = MDB_SUCCESS;
+			ptr += len;
+			wsize -= len;
+			continue;
+		} else {
+			rc = EIO;
+			break;
 	}
-#else
-	while (wsize > 0) {
-		size_t w2;
-		ssize_t wres;
-		if (wsize > MAX_WRITE)
-			w2 = MAX_WRITE;
-		else
-			w2 = wsize;
-		wres = write(fd, ptr, w2);
-		rc = wres == (ssize_t)w2 ? MDB_SUCCESS : wres < 0 ? ErrCode() : EIO;
-		if (rc) break;
-		wsize -= wres;
-		ptr += wres;
 	}
-#endif
 
 leave:
 	mdb_txn_abort(txn);
@@ -7659,7 +7694,10 @@ mdb_env_info(MDB_env *env, MDB_envinfo *arg)
 	arg->me_mapaddr = (env->me_flags & MDB_FIXEDMAP) ? env->me_map : 0;
 	arg->me_mapsize = env->me_mapsize;
 	arg->me_maxreaders = env->me_maxreaders;
-	arg->me_numreaders = env->me_numreaders;
+	/* me_numreaders may be zero if this process never used any readers. Use
+	 * the shared numreader count if it exists.
+	 */
+	arg->me_numreaders = env->me_txns ? env->me_txns->mti_numreaders : env->me_numreaders;
 	arg->me_last_pgno = env->me_metas[toggle]->mm_last_pg;
 	arg->me_last_txnid = env->me_metas[toggle]->mm_txnid;
 	return MDB_SUCCESS;
@@ -8055,7 +8093,7 @@ static int mdb_pid_insert(pid_t *ids, pid_t pid)
 			return -1;
 		}
 	}
-	
+
 	if( val > 0 ) {
 		++cursor;
 	}

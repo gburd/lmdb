@@ -36,6 +36,7 @@
 
 #include "common.h"
 #include "async_nif.h"
+#include "queue.h"
 #include "lmdb.h"
 
 
@@ -43,6 +44,7 @@ static ErlNifResourceType *lmdb_RESOURCE;
 struct lmdb {
     MDB_env *env;
     MDB_dbi dbi;
+    STAILQ_ENTRY(lmdb) entries;
 };
 
 static ErlNifResourceType *lmdb_txn_RESOURCE;
@@ -55,10 +57,9 @@ struct lmdb_cursor {
     MDB_cursor *cursor;
 };
 
-KHASH_MAP_INIT_PTR(envs, struct lmdb_env*);
 struct lmdb_priv_data {
     void *async_nif_priv; // Note: must be first element in struct
-    khash_t(envs) *envs; // TODO: could just be a list
+    STAILQ_HEAD(envs, lmdb) envs;
     ErlNifMutex *envs_mutex;
 };
 
@@ -66,27 +67,34 @@ struct lmdb_priv_data {
 ASYNC_NIF_INIT(lmdb);
 
 /* Atoms (initialized in on_load) */
-static ERL_NIF_TERM ATOM_ERROR;
-static ERL_NIF_TERM ATOM_OK;
-static ERL_NIF_TERM ATOM_NOT_FOUND;
-static ERL_NIF_TERM ATOM_EXISTS;
-static ERL_NIF_TERM ATOM_KEYEXIST;
-static ERL_NIF_TERM ATOM_NOTFOUND;
-static ERL_NIF_TERM ATOM_PAGE_NOTFOUND;
+static ERL_NIF_TERM ATOM_BAD_RSLOT;
+static ERL_NIF_TERM ATOM_BRANCH_PAGES;
 static ERL_NIF_TERM ATOM_CORRUPTED;
-static ERL_NIF_TERM ATOM_PANIC;
-static ERL_NIF_TERM ATOM_VERSION_MISMATCH;
-static ERL_NIF_TERM ATOM_KEYEXIST;
-static ERL_NIF_TERM ATOM_MAP_FULL;
+static ERL_NIF_TERM ATOM_CURSOR_FULL;
 static ERL_NIF_TERM ATOM_DBS_FULL;
+static ERL_NIF_TERM ATOM_DEPTH;
+static ERL_NIF_TERM ATOM_ENTRIES;
+static ERL_NIF_TERM ATOM_ERROR;
+static ERL_NIF_TERM ATOM_EXISTS;
+static ERL_NIF_TERM ATOM_INCOMPATIBLE;
+static ERL_NIF_TERM ATOM_KEYEXIST;
+static ERL_NIF_TERM ATOM_KEYEXIST;
+static ERL_NIF_TERM ATOM_LEAF_PAGES;
+static ERL_NIF_TERM ATOM_MAP_FULL;
+static ERL_NIF_TERM ATOM_MAP_RESIZED;
+static ERL_NIF_TERM ATOM_NOTFOUND;
+static ERL_NIF_TERM ATOM_NOT_FOUND;
+static ERL_NIF_TERM ATOM_OK;
+static ERL_NIF_TERM ATOM_OVERFLOW_PAGES;
+static ERL_NIF_TERM ATOM_PAGE_FULL;
+static ERL_NIF_TERM ATOM_PAGE_NOTFOUND;
+static ERL_NIF_TERM ATOM_PANIC;
+static ERL_NIF_TERM ATOM_PSIZE;
 static ERL_NIF_TERM ATOM_READERS_FULL;
 static ERL_NIF_TERM ATOM_TLS_FULL;
+static ERL_NIF_TERM ATOM_TRUE;
 static ERL_NIF_TERM ATOM_TXN_FULL;
-static ERL_NIF_TERM ATOM_CURSOR_FULL;
-static ERL_NIF_TERM ATOM_PAGE_FULL;
-static ERL_NIF_TERM ATOM_MAP_RESIZED;
-static ERL_NIF_TERM ATOM_INCOMPATIBLE;
-static ERL_NIF_TERM ATOM_BAD_RSLOT;
+static ERL_NIF_TERM ATOM_VERSION_MISMATCH;
 
 #define CHECK(expr, label)						\
     if (MDB_SUCCESS != (ret = (expr))) {				\
@@ -191,16 +199,16 @@ __strerror_term(ErlNifEnv* env, int err)
  * argv[5]    maxdbs
  */
 ASYNC_NIF_DECL(
-  lmdb_env_open_nif,
+  lmdb_env_open,
   { // struct
 
       char dirname[MAXPATHLEN];
       unsigned int flags;
-      mdb_mod_t mode;
+      mdb_mode_t mode;
       size_t mapsize;
       unsigned int maxreaders;
       MDB_dbi maxdbs;
-      struct wterl_priv_data *priv;
+      struct lmdb_priv_data *priv;
   },
   { // pre
 
@@ -215,54 +223,46 @@ ASYNC_NIF_DECL(
       }
       if (enif_get_string(env, argv[0], args->dirname, MAXPATHLEN, ERL_NIF_LATIN1) <= 0)
 	  ASYNC_NIF_RETURN_BADARG();
-      enif_get_uint32(env, argv[1], &(args->flags));
-      enif_get_int32(env, argv[2], &(args->mode));
+      enif_get_uint(env, argv[1], &(args->flags));
+      enif_get_uint(env, argv[2], &(args->mode));
 #if (__SIZEOF_SIZE_T__ == 8)
-      enif_get_int64(env, argv[3], &(args->mapsize));
-#else if (__SIZEOF_SIZE_T__ == 4)
-      enif_get_int32(env, argv[3], &(args->mapsize));
+      enif_get_uint64(env, argv[3], &(args->mapsize));
+#elif (__SIZEOF_SIZE_T__ == 4)
+      enif_get_int(env, argv[3], &(args->mapsize));
 #endif
-      enif_get_int32(env, argv[4], &(args->maxreaders));
-      enif_get_int32(env, argv[5], &(args->maxdbs));
+      enif_get_uint(env, argv[4], &(args->maxreaders));
+      enif_get_uint(env, argv[5], &(args->maxdbs));
       args->priv = (struct lmdb_priv_data *)enif_priv_data(env);
   },
   { // work
 
       int ret;
       ERL_NIF_TERM err;
-      struct lmdb_env *handle;
-      khash_t(envs) *h;
-      khiter_t itr;
-      int itr_status;
+      struct lmdb *handle;
 
       if ((handle = enif_alloc_resource(lmdb_RESOURCE, sizeof(struct lmdb))) == NULL)
 	  FAIL_ERR(ENOMEM, err2);
 
-      STAT_INIT(handle, lmdb_env_get);
-      STAT_INIT(handle, lmdb_env_put);
-      STAT_INIT(handle, lmdb_env_upd);
-      STAT_INIT(handle, lmdb_env_del);
-
       CHECK(mdb_env_create(&(handle->env)), err1);
 
       if (mdb_env_set_mapsize(handle->env, args->mapsize)) {
-	  err = enif_make_badarg(handle->env);
+	  err = enif_make_badarg(env);
           goto err1;
       }
 
       if (mdb_env_set_maxreaders(handle->env, args->maxreaders)) {
-	  err = enif_make_badarg(handle->env);
+	  err = enif_make_badarg(env);
           goto err1;
       }
 
       if (mdb_env_set_maxdbs(handle->env, args->maxdbs)) {
-	  err = enif_make_badarg(handle->env);
+	  err = enif_make_badarg(env);
           goto err1;
       }
 
-      h = args->priv->envs;
-      itr = kh_put(envs, h, handle, &itr_status);
-      kh_value(h, itr) = handle;
+      enif_mutex_lock(args->priv->envs_mutex);
+      STAILQ_INSERT_TAIL(&args->priv->envs, handle, entries);
+      enif_mutex_unlock(args->priv->envs_mutex);
 
       ERL_NIF_TERM term = enif_make_resource(env, handle);
       ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_OK, term));
@@ -287,17 +287,17 @@ ASYNC_NIF_DECL(
  * argv[1]    destination path
  */
 ASYNC_NIF_DECL(
-  lmdb_copy_nif,
+  lmdb_copy,
   { // struct
 
-      struct lmdb_env *handle;
+      struct lmdb *handle;
       char dirname[MAXPATHLEN];
   },
   { // pre
 
       if (!(argc == 2 &&
 	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle) &&
-	    enif_is_list(env, arg[1])) {
+	    enif_is_list(env, argv[1]))) {
 	  ASYNC_NIF_RETURN_BADARG();
       }
       if (enif_get_string(env, argv[1], args->dirname, MAXPATHLEN,
@@ -312,7 +312,7 @@ ASYNC_NIF_DECL(
       ERL_NIF_TERM err;
       int ret;
 
-      CHECK(mdb_env_copy(args->handle->env, args->dirname, err));
+      CHECK(mdb_env_copy(args->handle->env, args->dirname), err);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -323,15 +323,15 @@ ASYNC_NIF_DECL(
   { // post
 
       enif_release_resource((void*)args->handle);
-  }).
+  });
 
 /**
- * ??
+ * Return statistics about the MDB environment.
  *
- * argv[0]    ??
+ * argv[0]    an environment handle
  */
 ASYNC_NIF_DECL(
-  lmdb_??_nif,
+  lmdb_stat,
   { // struct
 
       struct lmdb *handle;
@@ -349,20 +349,77 @@ ASYNC_NIF_DECL(
   { // work
 
       ERL_NIF_TERM err;
+      ERL_NIF_TERM term;
+      MDB_stat stats;
       int ret;
 
-      CHECK(??, err);
+      CHECK(mdb_env_stat(args->handle->env, &stats), err1);
+
+      term = enif_make_tuple(env, 6,
+			     enif_make_tuple(env, 2, ATOM_PSIZE, enif_make_uint(env, stats.ms_psize)),
+			     enif_make_tuple(env, 2, ATOM_DEPTH, enif_make_uint(env, stats.ms_depth)),
+			     enif_make_tuple(env, 2, ATOM_BRANCH_PAGES, enif_make_uint(env, stats.ms_branch_pages)),
+			     enif_make_tuple(env, 2, ATOM_LEAF_PAGES, enif_make_uint(env, stats.ms_leaf_pages)),
+			     enif_make_tuple(env, 2, ATOM_OVERFLOW_PAGES, enif_make_uint(env, stats.ms_overflow_pages)),
+			     enif_make_tuple(env, 2, ATOM_ENTRIES, enif_make_uint(env, stats.ms_entries)));
+
       ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_OK, term));
       return;
 
-  err:
+  err1:
       ASYNC_NIF_REPLY(err);
       return;
   },
   { // post
 
       enif_release_resource((void*)args->handle);
-  }).
+  });
+
+/**
+ * Flush the data buffers to disk.
+ *
+ * argv[0]    an environment handle
+ * argv[1]    if true, force a synchronous flush.  Otherwise if the environment
+ *            has the ?MDB_NOSYNC flag set the flushes will be omitted, and
+ *            with ?MDB_MAPASYNC they will be asynchronous.
+ */
+ASYNC_NIF_DECL(
+  lmdb_sync,
+  { // struct
+
+      struct lmdb *handle;
+      int force;
+  },
+  { // pre
+
+      if (!(argc == 2 &&
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle) &&
+	    enif_is_atom(env, argv[1]))) {
+	  ASYNC_NIF_RETURN_BADARG();
+      }
+
+      args->force = enif_is_identical(ATOM_TRUE, argv[1]) ? 1 : 0;
+      if (!args->handle->env)
+	  ASYNC_NIF_RETURN_BADARG();
+      enif_keep_resource((void*)args->handle);
+  },
+  { // work
+
+      ERL_NIF_TERM err;
+      int ret;
+
+      CHECK(mdb_env_sync(args->handle->env, args->force), err1);
+      ASYNC_NIF_REPLY(enif_make_tuple(env, 1, ATOM_OK));
+      return;
+
+  err1:
+      ASYNC_NIF_REPLY(err);
+      return;
+  },
+  { // post
+
+      enif_release_resource((void*)args->handle);
+  });
 
 /**
  * Opens a MDB database.
@@ -825,7 +882,6 @@ lmdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 {
     UNUSED(load_info);
     int err;
-    char msg[1024];
     ErlNifResourceFlags flags;
     struct lmdb_priv_data *priv;
 
@@ -835,21 +891,20 @@ lmdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 	FAIL_ERR(ENOMEM, err1);
     memset(priv, 0, sizeof(struct lmdb_priv_data));
     priv->envs_mutex = enif_mutex_create(NULL);
-    priv->envs = kh_init(envs);
-    if (!priv->envs)
-	FAIL_ERR(ENOMEM, err2);
+    STAILQ_INIT(&priv->envs);
 
     /* Note: !!! the first element of our priv_data struct *must* be the
        pointer to the async_nif's private data which we set here. */
     ASYNC_NIF_LOAD(lmdb, priv->async_nif_priv);
     if (!priv)
-	FAIL_ERR(ENOMEM, err3);
+	FAIL_ERR(ENOMEM, err2);
     *priv_data = priv;
 
     ATOM_ERROR = enif_make_atom(env, "error");
     ATOM_OK = enif_make_atom(env, "ok");
     ATOM_NOT_FOUND = enif_make_atom(env, "not_found");
     ATOM_EXISTS = enif_make_atom(env, "exists");
+    ATOM_TRUE = enif_make_atom(env, "true");
 
     ATOM_KEYEXIST = enif_make_atom(env, "key_exist");
     ATOM_NOTFOUND = enif_make_atom(env, "notfound");
@@ -867,18 +922,25 @@ lmdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     ATOM_INCOMPATIBLE = enif_make_atom(env, "incompatible");
     ATOM_BAD_RSLOT = enif_make_atom(env, "bad_rslot");
 
+    ATOM_PSIZE = enif_make_atom(env, "psize");
+    ATOM_DEPTH = enif_make_atom(env, "depth");
+    ATOM_BRANCH_PAGES = enif_make_atom(env, "branch_pages");
+    ATOM_LEAF_PAGES = enif_make_atom(env, "leaf_pages");
+    ATOM_OVERFLOW_PAGES = enif_make_atom(env, "overflow_pages");
+    ATOM_ENTRIES = enif_make_atom(env, "entries");
+
+
     lmdb_RESOURCE = enif_open_resource_type(env, NULL, "lmdb_resource",
 					    NULL, flags, NULL);
     fprintf(stderr, "NIF on_load complete (lmdb version: %s)", MDB_VERSION_STRING);
     fflush(stderr);
     return (0);
-err3:
-    kh_destroy(envs, priv->envs);
+
 err2:
-    enif_mutex_destroy(priv->conns_mutex);
+    enif_mutex_destroy(priv->envs_mutex);
     enif_free(priv);
 err1:
-    return (ENOMEM);
+    return (err);
 }
 
 /**
@@ -916,24 +978,13 @@ static void
 lmdb_unload(ErlNifEnv* env, void* priv_data)
 {
     struct lmdb_priv_data *priv = (struct lmdb_priv_data *)priv_data;
-    khash_t(envs) *h;
-    khiter_t itr_envs;
-    struct lmdb_env *env;
+    struct lmdb *handle;
 
     enif_mutex_lock(priv->envs_mutex);
-    h = priv->envs;
-    for (itr_envs = kh_begin(h); itr_envs != kh_end(h); ++itr_envs) {
-      if (kh_exist(h, itr_envs)) {
-        env = kh_val(h, itr_envs);
-        if (env) {
-	    mdb_env_close(env);
-	    kh_del(envs, h, itr_envs);
-	    enif_free(env);
-	    kh_value(h, itr_envs) = NULL;
-	}
-      }
+    STAILQ_FOREACH(handle, &priv->envs, entries) {
+	mdb_env_close(handle->env);
+	enif_free(handle);
     }
-    kh_destroy(envs, h);
     ASYNC_NIF_UNLOAD(lmdb, env, priv->async_nif_priv);
     enif_mutex_unlock(priv->envs_mutex);
     enif_mutex_destroy(priv->envs_mutex);
