@@ -422,6 +422,207 @@ ASYNC_NIF_DECL(
   });
 
 /**
+ * Close the environment and release the memory map.
+ *
+ * argv[0]    an environment handle
+ */
+ASYNC_NIF_DECL(
+  lmdb_env_close,
+  { // struct
+
+      struct lmdb *handle;
+  },
+  { // pre
+
+      if (!(argc == 1 &&
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle))) {
+	  ASYNC_NIF_RETURN_BADARG();
+      }
+      if (!args->handle->env)
+	  ASYNC_NIF_RETURN_BADARG();
+      enif_keep_resource((void*)args->handle);
+  },
+  { // work
+
+   /* Only a single thread may call mdb_env_close() function. All transactions,
+      databases, and cursors must already be closed before calling this
+      function. Attempts to use any such handles after calling this function
+      will cause a SIGSEGV.  The environment handle will be freed and must not
+      be used again after this call. */
+
+      /* TODO(gburd): close eveything first */
+      mdb_env_close(args->handle->env);
+      ASYNC_NIF_REPLY(enif_make_tuple(env, 1, ATOM_OK));
+      return;
+  },
+  { // post
+
+      enif_release_resource((void*)args->handle);
+  });
+
+/**
+ * Return the path that was used in lmdb:env_open().
+ *
+ * argv[0]    an environment handle
+ */
+ASYNC_NIF_DECL(
+  lmdb_path,
+  { // struct
+
+      struct lmdb *handle;
+  },
+  { // pre
+
+      if (!(argc == 1 &&
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle))) {
+	  ASYNC_NIF_RETURN_BADARG();
+      }
+      if (!args->handle->env)
+	  ASYNC_NIF_RETURN_BADARG();
+      enif_keep_resource((void*)args->handle);
+  },
+  { // work
+
+      ERL_NIF_TERM err;
+      int ret;
+      const char *path;
+
+      CHECK(mdb_env_get_path(args->handle->env, &path), err1);
+      ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_OK,
+				      enif_make_string(env, path, ERL_NIF_LATIN1)));
+      return;
+
+  err1:
+      ASYNC_NIF_REPLY(err);
+      return;
+  },
+  { // post
+
+      enif_release_resource((void*)args->handle);
+  });
+
+/**
+ * Set the maximum number of named databases for the environment.
+ *
+ * This function is only needed if multiple databases will be used in the
+ * environment. Simpler applications that use the environment as a single
+ * unnamed database can ignore this option.  This function may only be called
+ * after lmdb:env_create() and before lmdb:env_open().
+ *
+ * argv[0]    an environment handle
+ * argv[1]    the maximum number of databases
+ */
+ASYNC_NIF_DECL(
+  lmdb_set_maxdbs,
+  { // struct
+
+      struct lmdb *handle;
+      unsigned int dbs;
+  },
+  { // pre
+
+      if (!(argc == 1 &&
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle) &&
+	    enif_is_number(env, argv[1]))) {
+	  ASYNC_NIF_RETURN_BADARG();
+      }
+      if (!args->handle->env)
+	  ASYNC_NIF_RETURN_BADARG();
+      enif_get_uint(env, argv[1], &(args->dbs));
+      enif_keep_resource((void*)args->handle);
+  },
+  { // work
+
+      ERL_NIF_TERM err;
+      int ret;
+
+      CHECK(mdb_env_set_maxdbs(args->handle->env, args->dbs), err1);
+      ASYNC_NIF_REPLY(enif_make_tuple(env, 1, ATOM_OK));
+      return;
+
+  err1:
+      ASYNC_NIF_REPLY(err);
+      return;
+  },
+  { // post
+
+      enif_release_resource((void*)args->handle);
+  });
+
+/**
+ * Create a transaction for use with the environment.
+ *
+ * The transaction handle may be discarded using lmdb:txn_abort() or
+ * lmdb:txn_commit().
+ *
+
+ * NOTE: A transaction and its cursors must only be used by a single
+ * thread, and a thread may only have a single transaction at a time.
+	 * If #MDB_NOTLS is in use, this does not apply to read-only transactions.
+	 * @note Cursors may not span transactions.
+	 * @param[in] env An environment handle returned by #mdb_env_create()
+	 * @param[in] parent If this parameter is non-NULL, the new transaction
+	 * will be a nested transaction, with the transaction indicated by \b parent
+	 * as its parent. Transactions may be nested to any level. A parent
+	 * transaction may not issue any other operations besides mdb_txn_begin,
+	 * mdb_txn_abort, or mdb_txn_commit while it has active child transactions.
+	 * @param[in] flags Special options for this transaction. This parameter
+	 * must be set to 0 or by bitwise OR'ing together one or more of the
+	 * values described here.
+	 * <ul>
+	 *	<li>#MDB_RDONLY
+	 *		This transaction will not perform any write operations.
+	 * </ul>
+	 * @param[out] txn Address where the new #MDB_txn handle will be stored
+	 * @return A non-zero error value on failure and 0 on success. Some possible
+	 * errors are:
+	 * <ul>
+	 *	<li>#MDB_PANIC - a fatal error occurred earlier and the environment
+	 *		must be shut down.
+	 *	<li>#MDB_MAP_RESIZED - another process wrote data beyond this MDB_env's
+	 *		mapsize and the environment must be shut down.
+	 *	<li>#MDB_READERS_FULL - a read-only transaction was requested and
+	 *		the reader lock table is full. See #mdb_env_set_maxreaders().
+	 *	<li>ENOMEM - out of memory.
+	 * </ul>
+ *
+ * argv[0]    ??
+ */
+ASYNC_NIF_DECL(
+  lmdb_??,
+  { // struct
+
+      struct lmdb *handle;
+  },
+  { // pre
+
+      if (!(argc == 1 &&
+	    enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle))) {
+	  ASYNC_NIF_RETURN_BADARG();
+      }
+      if (!args->handle->env)
+	  ASYNC_NIF_RETURN_BADARG();
+      enif_keep_resource((void*)args->handle);
+  },
+  { // work
+
+      ERL_NIF_TERM err;
+      int ret;
+
+      CHECK(??, err1);
+      ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_OK, term));
+      return;
+
+  err1:
+      ASYNC_NIF_REPLY(err);
+      return;
+  },
+  { // post
+
+      enif_release_resource((void*)args->handle);
+  });
+
+/**
  * Opens a MDB database.
  *
  * Note: mdb_dbi_open() must not be called from multiple concurrent
