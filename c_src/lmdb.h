@@ -48,8 +48,10 @@
  *	  cause further writes to grow the database quickly, and
  *	  stale locks can block further operation.
  *
- *	  Fix: Terminate all programs using the database, or make
- *	  them close it.  Next database user will reset the lockfile.
+ *	  Fix: Check for stale readers periodically, using the
+ *	  #mdb_reader_check function or the mdb_stat tool. Or just
+ *	  make all programs using the database close it; the lockfile
+ *	  is always reset on first open of the environment.
  *
  *	- On BSD systems or others configured with MDB_USE_POSIX_SEM,
  *	  startup can fail due to semaphores owned by another userid.
@@ -86,11 +88,12 @@
  *	...when several processes can use a database concurrently:
  *
  *	- Avoid aborting a process with an active transaction.
- *	  The transaction becomes "long-lived" as above until the lockfile
- *	  is reset, since the process may not remove it from the lockfile.
+ *	  The transaction becomes "long-lived" as above until a check
+ *	  for stale readers is performed or the lockfile is reset,
+ *	  since the process may not remove it from the lockfile.
  *
- *	- If you do that anyway, close the environment once in a while,
- *	  so the lockfile can get reset.
+ *	- If you do that anyway, do a periodic check for stale readers. Or
+ *	  close the environment once in a while, so the lockfile can get reset.
  *
  *	- Do not use MDB databases on remote filesystems, even between
  *	  processes on the same host.  This breaks flock() on some OSes,
@@ -138,6 +141,7 @@
 extern "C" {
 #endif
 
+/** Unix permissions for creating files, or dummy definition for Windows */
 #ifdef _MSC_VER
 typedef	int	mdb_mode_t;
 #else
@@ -166,7 +170,7 @@ typedef int mdb_filehandle_t;
 /** Library minor version */
 #define MDB_VERSION_MINOR	9
 /** Library patch version */
-#define MDB_VERSION_PATCH	7
+#define MDB_VERSION_PATCH	8
 
 /** Combine args a,b,c into a single integer for easy version comparisons */
 #define MDB_VERINT(a,b,c)	(((a) << 24) | ((b) << 16) | (c))
@@ -176,7 +180,7 @@ typedef int mdb_filehandle_t;
 	MDB_VERINT(MDB_VERSION_MAJOR,MDB_VERSION_MINOR,MDB_VERSION_PATCH)
 
 /** The release date of this library version */
-#define MDB_VERSION_DATE	"January 10, 2013"
+#define MDB_VERSION_DATE	"September 9, 2013"
 
 /** A stringifier for the version info */
 #define MDB_VERSTR(a,b,c,d)	"MDB " #a "." #b "." #c ": (" d ")"
@@ -382,11 +386,15 @@ typedef enum MDB_cursor_op {
 #define MDB_PAGE_FULL	(-30786)
 	/** Database contents grew beyond environment mapsize */
 #define MDB_MAP_RESIZED	(-30785)
-	/** Database flags changed or would change */
+	/** MDB_INCOMPATIBLE: Operation and DB incompatible, or DB flags changed */
 #define MDB_INCOMPATIBLE	(-30784)
 	/** Invalid reuse of reader locktable slot */
 #define MDB_BAD_RSLOT		(-30783)
-#define MDB_LAST_ERRCODE	MDB_BAD_RSLOT
+	/** Transaction cannot recover - it must be aborted */
+#define MDB_BAD_TXN			(-30782)
+	/** Too big key/data, key is empty, or wrong DUPFIXED size */
+#define MDB_BAD_VALSIZE		(-30781)
+#define MDB_LAST_ERRCODE	MDB_BAD_VALSIZE
 /** @} */
 
 /** @brief Statistics for a database in the environment */
@@ -534,6 +542,10 @@ int  mdb_env_open(MDB_env *env, const char *path, unsigned int flags, mdb_mode_t
 	/** @brief Copy an MDB environment to the specified path.
 	 *
 	 * This function may be used to make a backup of an existing environment.
+	 * No lockfile is created, since it gets recreated at need.
+	 * @note This call can trigger significant file size growth if run in
+	 * parallel with write transactions, because it employs a read-only
+	 * transaction. See long-lived transactions under @ref caveats_sec.
 	 * @param[in] env An environment handle returned by #mdb_env_create(). It
 	 * must have already been opened successfully.
 	 * @param[in] path The directory in which the copy will reside. This
@@ -546,6 +558,10 @@ int  mdb_env_copy(MDB_env *env, const char *path);
 	/** @brief Copy an MDB environment to the specified file descriptor.
 	 *
 	 * This function may be used to make a backup of an existing environment.
+	 * No lockfile is created, since it gets recreated at need.
+	 * @note This call can trigger significant file size growth if run in
+	 * parallel with write transactions, because it employs a read-only
+	 * transaction. See long-lived transactions under @ref caveats_sec.
 	 * @param[in] env An environment handle returned by #mdb_env_create(). It
 	 * must have already been opened successfully.
 	 * @param[in] fd The filedescriptor to write the copy to. It must
@@ -646,8 +662,15 @@ int  mdb_env_get_path(MDB_env *env, const char **path);
 	 * 10485760 bytes. The size of the memory map is also the maximum size
 	 * of the database. The value should be chosen as large as possible,
 	 * to accommodate future growth of the database.
-	 * This function may only be called after #mdb_env_create() and before #mdb_env_open().
-	 * The size may be changed by closing and reopening the environment.
+	 * This function should be called after #mdb_env_create() and before #mdb_env_open().
+	 * It may be called at later times if no transactions are active in
+	 * this process. Note that the library does not check for this condition,
+	 * the caller must ensure it explicitly.
+	 *
+	 * If the mapsize is changed by another process, #mdb_txn_begin() will
+	 * return #MDB_MAP_RESIZED. This function may be called with a size
+	 * of zero to adopt the new size.
+	 *
 	 * Any attempt to set a size smaller than the space already consumed
 	 * by the environment will be silently changed to the current size of the used space.
 	 * @param[in] env An environment handle returned by #mdb_env_create()
@@ -655,7 +678,8 @@ int  mdb_env_get_path(MDB_env *env, const char **path);
 	 * @return A non-zero error value on failure and 0 on success. Some possible
 	 * errors are:
 	 * <ul>
-	 *	<li>EINVAL - an invalid parameter was specified, or the environment is already open.
+	 *	<li>EINVAL - an invalid parameter was specified, or the environment has
+	 *   	an active write transaction.
 	 * </ul>
 	 */
 int  mdb_env_set_mapsize(MDB_env *env, size_t size);
@@ -707,6 +731,13 @@ int  mdb_env_get_maxreaders(MDB_env *env, unsigned int *readers);
 	 */
 int  mdb_env_set_maxdbs(MDB_env *env, MDB_dbi dbs);
 
+	/** @brief Get the maximum size of a key for the environment.
+	 *
+	 * @param[in] env An environment handle returned by #mdb_env_create()
+	 * @return The maximum size of a key. (#MDB_MAXKEYSIZE)
+	 */
+int  mdb_env_get_maxkeysize(MDB_env *env);
+
 	/** @brief Create a transaction for use with the environment.
 	 *
 	 * The transaction handle may be discarded using #mdb_txn_abort() or #mdb_txn_commit().
@@ -718,8 +749,8 @@ int  mdb_env_set_maxdbs(MDB_env *env, MDB_dbi dbs);
 	 * @param[in] parent If this parameter is non-NULL, the new transaction
 	 * will be a nested transaction, with the transaction indicated by \b parent
 	 * as its parent. Transactions may be nested to any level. A parent
-	 * transaction may not issue any other operations besides mdb_txn_begin,
-	 * mdb_txn_abort, or mdb_txn_commit while it has active child transactions.
+	 * transaction and its cursors may not issue any other operations than
+	 * mdb_txn_commit and mdb_txn_abort while it has active child transactions.
 	 * @param[in] flags Special options for this transaction. This parameter
 	 * must be set to 0 or by bitwise OR'ing together one or more of the
 	 * values described here.
@@ -734,13 +765,20 @@ int  mdb_env_set_maxdbs(MDB_env *env, MDB_dbi dbs);
 	 *	<li>#MDB_PANIC - a fatal error occurred earlier and the environment
 	 *		must be shut down.
 	 *	<li>#MDB_MAP_RESIZED - another process wrote data beyond this MDB_env's
-	 *		mapsize and the environment must be shut down.
+	 *		mapsize and this environment's map must be resized as well.
+	 *		See #mdb_env_set_mapsize().
 	 *	<li>#MDB_READERS_FULL - a read-only transaction was requested and
 	 *		the reader lock table is full. See #mdb_env_set_maxreaders().
 	 *	<li>ENOMEM - out of memory.
 	 * </ul>
 	 */
 int  mdb_txn_begin(MDB_env *env, MDB_txn *parent, unsigned int flags, MDB_txn **txn);
+
+	/** @brief Returns the transaction's #MDB_env
+	 *
+	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
+	 */
+MDB_env *mdb_txn_env(MDB_txn *txn);
 
 	/** @brief Commit all the operations of a transaction into the database.
 	 *
@@ -891,12 +929,12 @@ int  mdb_stat(MDB_txn *txn, MDB_dbi dbi, MDB_stat *stat);
 
 	/** @brief Retrieve the DB flags for a database handle.
 	 *
-	 * @param[in] env An environment handle returned by #mdb_env_create()
+	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
 	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
 	 * @param[out] flags Address where the flags will be returned.
 	 * @return A non-zero error value on failure and 0 on success.
 	 */
-int mdb_dbi_flags(MDB_env *env, MDB_dbi dbi, unsigned int *flags);
+int mdb_dbi_flags(MDB_txn *txn, MDB_dbi dbi, unsigned int *flags);
 
 	/** @brief Close a database handle.
 	 *
@@ -909,14 +947,12 @@ int mdb_dbi_flags(MDB_env *env, MDB_dbi dbi, unsigned int *flags);
 	 */
 void mdb_dbi_close(MDB_env *env, MDB_dbi dbi);
 
-	/** @brief Delete a database and/or free all its pages.
+	/** @brief Empty or delete+close a database.
 	 *
-	 * If the \b del parameter is 1, the DB handle will be closed
-	 * and the DB will be deleted.
 	 * @param[in] txn A transaction handle returned by #mdb_txn_begin()
 	 * @param[in] dbi A database handle returned by #mdb_dbi_open()
-	 * @param[in] del 1 to delete the DB from the environment,
-	 * 0 to just free its pages.
+	 * @param[in] del 0 to empty the DB, 1 to delete it from the
+	 * environment and close the DB handle.
 	 * @return A non-zero error value on failure and 0 on success.
 	 */
 int  mdb_drop(MDB_txn *txn, MDB_dbi dbi, int del);
