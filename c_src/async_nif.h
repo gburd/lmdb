@@ -35,8 +35,17 @@ extern "C" {
 
 #define ASYNC_NIF_MAX_WORKERS 1024
 #define ASYNC_NIF_MIN_WORKERS 2
-#define ASYNC_NIF_WORKER_QUEUE_SIZE 256
+#define ASYNC_NIF_WORKER_QUEUE_SIZE 8192
 #define ASYNC_NIF_MAX_QUEUED_REQS ASYNC_NIF_WORKER_QUEUE_SIZE * ASYNC_NIF_MAX_WORKERS
+
+/* Atoms (initialized in on_load) */
+static ERL_NIF_TERM ATOM_EAGAIN;
+static ERL_NIF_TERM ATOM_ENOMEM;
+static ERL_NIF_TERM ATOM_ENQUEUED;
+static ERL_NIF_TERM ATOM_ERROR;
+static ERL_NIF_TERM ATOM_OK;
+static ERL_NIF_TERM ATOM_SHUTDOWN;
+
 
 struct async_nif_req_entry {
   ERL_NIF_TERM ref;
@@ -105,15 +114,11 @@ struct async_nif_state {
     argc -= 1;                                                          \
     /* Note: !!! this assumes that the first element of priv_data is ours */ \
     struct async_nif_state *async_nif = *(struct async_nif_state**)enif_priv_data(env); \
-    if (async_nif->shutdown) {                                          \
-      return enif_make_tuple2(env, enif_make_atom(env, "error"),        \
-                              enif_make_atom(env, "shutdown"));         \
-    }                                                                   \
+    if (async_nif->shutdown)						\
+	return enif_make_tuple2(env, ATOM_ERROR, ATOM_SHUTDOWN);	\
     req = async_nif_reuse_req(async_nif);                               \
-    if (!req) {                                                         \
-        return enif_make_tuple2(env, enif_make_atom(env, "error"),      \
-                                enif_make_atom(env, "eagain"));         \
-    }                                                                   \
+    if (!req)								\
+        return enif_make_tuple2(env, ATOM_ERROR, ATOM_ENOMEM);		\
     new_env = req->env;                                                 \
     DPRINTF("async_nif: calling \"%s\"", __func__);                     \
     do pre_block while(0);                                              \
@@ -122,8 +127,7 @@ struct async_nif_state {
     if (!copy_of_args) {                                                \
       fn_post_ ## decl (args);                                          \
       async_nif_recycle_req(req, async_nif);                            \
-      return enif_make_tuple2(env, enif_make_atom(env, "error"),        \
-                              enif_make_atom(env, "enomem"));           \
+      return enif_make_tuple2(env, ATOM_ERROR, ATOM_ENOMEM);		\
     }                                                                   \
     memcpy(copy_of_args, args, sizeof(struct decl ## _args));           \
     req->ref = enif_make_copy(new_env, argv_in[0]);                     \
@@ -139,8 +143,7 @@ struct async_nif_state {
       fn_post_ ## decl (args);                                         \
       async_nif_recycle_req(req, async_nif);                           \
       free(copy_of_args);					       \
-      return enif_make_tuple2(env, enif_make_atom(env, "error"),       \
-                              enif_make_atom(env, "eagain"));          \
+      return enif_make_tuple2(env, ATOM_ERROR, ATOM_EAGAIN);	       \
     }                                                                  \
     return reply;                                                      \
   }
@@ -353,8 +356,10 @@ async_nif_enqueue_req(struct async_nif_state* async_nif, struct async_nif_req_en
   /* Build the term before releasing the lock so as not to race on the use of
      the req pointer (which will soon become invalid in another thread
      performing the request). */
-  ERL_NIF_TERM reply = enif_make_tuple2(req->env, enif_make_atom(req->env, "ok"),
-                                        enif_make_atom(req->env, "enqueued"));
+  double pct_full = (double)avg_depth / (double)ASYNC_NIF_WORKER_QUEUE_SIZE;
+  ERL_NIF_TERM reply = enif_make_tuple2(req->env, ATOM_OK,
+					enif_make_tuple2(req->env, ATOM_ENQUEUED,
+							 enif_make_double(req->env, pct_full)));
   pthread_cond_signal(&q->reqs_cnd);
   pthread_mutex_unlock(&q->reqs_mutex);
   return reply;
@@ -496,8 +501,7 @@ async_nif_unload(ErlNifEnv *env, struct async_nif_state *async_nif)
           struct async_nif_req_entry *n = STAILQ_NEXT(req, entries);
           enif_clear_env(req->env);
           enif_send(NULL, &req->pid, req->env,
-                    enif_make_tuple2(req->env, enif_make_atom(req->env, "error"),
-                                     enif_make_atom(req->env, "shutdown")));
+		    enif_make_tuple2(req->env, ATOM_ERROR, ATOM_SHUTDOWN));
           req->fn_post(req->args);
           enif_free_env(req->env);
           free(req->args);
@@ -526,7 +530,7 @@ async_nif_unload(ErlNifEnv *env, struct async_nif_state *async_nif)
 }
 
 static void *
-async_nif_load()
+async_nif_load(ErlNifEnv *env)
 {
   static int has_init = 0;
   unsigned int i, num_queues;
@@ -536,6 +540,14 @@ async_nif_load()
   /* Don't init more than once. */
   if (has_init) return 0;
   else has_init = 1;
+
+  /* Init some static references to commonly used atoms. */
+  ATOM_EAGAIN = enif_make_atom(env, "eagain");
+  ATOM_ENOMEM = enif_make_atom(env, "enomem");
+  ATOM_ENQUEUED = enif_make_atom(env, "enqueued");
+  ATOM_ERROR = enif_make_atom(env, "error");
+  ATOM_OK = enif_make_atom(env, "ok");
+  ATOM_SHUTDOWN = enif_make_atom(env, "shutdown");
 
   /* Find out how many schedulers there are. */
   enif_system_info(&info, sizeof(ErlNifSysInfo));

@@ -1096,7 +1096,7 @@ lmdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 
     /* Note: !!! the first element of our priv_data struct *must* be the
        pointer to the async_nif's private data which we set here. */
-    ASYNC_NIF_LOAD(lmdb, priv->async_nif_priv);
+    ASYNC_NIF_LOAD(lmdb, env, priv->async_nif_priv);
     if (!priv)
 	FAIL_ERR(ENOMEM, err2);
     *priv_data = priv;

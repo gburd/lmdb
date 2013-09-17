@@ -24,8 +24,14 @@
 -define(ASYNC_NIF_CALL(Fun, Args),
 	F = fun(F, T) ->
 		    R = erlang:make_ref(),
-		    case erlang:apply(F, [R|Args]) of
-			{ok, enqueued} ->
+		    case erlang:apply(Fun, [R|Args]) of
+			{ok, {enqueued, PctBusy}} ->
+			    if
+				PctBusy > 0.25 andalso PctBusy =< 1.0 ->
+				    erlang:bump_reductions(erlang:trunc(2000 * PctBusy));
+			       true ->
+				    ok
+			    end,
 			    receive
 				{R, {error, shutdown}=Error} ->
 				    %% Work unit was queued, but not executed.
@@ -37,11 +43,12 @@
 				    Reply
 			    end;
 			{error, eagain} ->
-			    SleepyTime = min(30, (T+1)*2),
-			    timer:sleep(SleepyTime),
-			    F(F, SleepyTime);
+			    case T of
+				3 -> not_found;
+				_ -> F(F, T + 1)
+			    end;
 			Other ->
 			    Other
 		    end
 	    end,
-	F(Fun, 0)).
+	F(F, 1)).
