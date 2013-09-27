@@ -122,6 +122,7 @@
 
 #include "lmdb.h"
 #include "midl.h"
+#include "common.h"
 
 #if (BYTE_ORDER == LITTLE_ENDIAN) == (BYTE_ORDER == BIG_ENDIAN)
 # error "Unknown or unsupported endianness (BYTE_ORDER)"
@@ -5233,7 +5234,7 @@ mdb_cursor_set(MDB_cursor *mc, MDB_val *key, MDB_val *data,
 			mc->mc_ki[mc->mc_top] = 0;
 			if (op == MDB_SET_RANGE)
 				goto set1;
-			else 
+			else
 				return MDB_NOTFOUND;
 		}
 	}
@@ -8226,6 +8227,7 @@ int mdb_set_relctx(MDB_txn *txn, MDB_dbi dbi, void *ctx)
 
 int mdb_env_get_maxkeysize(MDB_env *env)
 {
+	UNUSED(env);
 	return MDB_MAXKEYSIZE;
 }
 
@@ -8247,7 +8249,7 @@ int mdb_reader_list(MDB_env *env, MDB_msg_func *func, void *ctx)
 		if (mr[i].mr_pid) {
 			size_t tid;
 			int rc;
-			tid = mr[i].mr_tid;
+			tid = (unsigned long)mr[i].mr_tid;
 			if (mr[i].mr_txnid == (txnid_t)-1) {
 				sprintf(buf, "%10d %"Z"x -\n", mr[i].mr_pid, tid);
 			} else {
@@ -8296,7 +8298,7 @@ static int mdb_pid_insert(pid_t *ids, pid_t pid)
 			return -1;
 		}
 	}
-	
+
 	if( val > 0 ) {
 		++cursor;
 	}
