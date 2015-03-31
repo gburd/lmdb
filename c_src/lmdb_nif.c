@@ -41,6 +41,8 @@
 static ErlNifResourceType *lmdb_RESOURCE;
 struct lmdb {
     MDB_env *env;
+    MDB_txn *txn;
+    MDB_cursor *cursor;
     MDB_dbi dbi;
 };
 
@@ -73,6 +75,9 @@ static ERL_NIF_TERM ATOM_PAGE_FULL;
 static ERL_NIF_TERM ATOM_MAP_RESIZED;
 static ERL_NIF_TERM ATOM_INCOMPATIBLE;
 static ERL_NIF_TERM ATOM_BAD_RSLOT;
+
+static ERL_NIF_TERM ATOM_TXN_STARTED;
+static ERL_NIF_TERM ATOM_TXN_NOT_STARTED;
 
 #define CHECK(expr, label)						\
     if (MDB_SUCCESS != (ret = (expr))) {				\
@@ -216,6 +221,9 @@ ASYNC_NIF_DECL(
       CHECK(mdb_open(txn, NULL, 0, &(handle->dbi)), err1);
       CHECK(mdb_txn_commit(txn), err1);
 
+      handle->txn = NULL;
+      handle->cursor = NULL;
+
       ERL_NIF_TERM term = enif_make_resource(env, handle);
       enif_release_resource(handle);
       ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_OK, term));
@@ -320,7 +328,11 @@ ASYNC_NIF_DECL(
       mkey.mv_data  = key.data;
       mdata.mv_size = val.size;
       mdata.mv_data = val.data;
-      CHECK(mdb_txn_begin(args->handle->env, NULL, 0, & txn), err2);
+      if(args->handle->txn == NULL) {
+          CHECK(mdb_txn_begin(args->handle->env, NULL, 0, & txn), err2);
+      } else {
+          txn = args->handle->txn;
+      }
 
       ret = mdb_put(txn, args->handle->dbi, &mkey, &mdata, MDB_NOOVERWRITE);
       if (MDB_KEYEXIST == ret) {
@@ -330,7 +342,8 @@ ASYNC_NIF_DECL(
       if (ret != 0)
 	  FAIL_ERR(ret, err1);
 
-      CHECK(mdb_txn_commit(txn), err1);
+      if(args->handle->txn == NULL)
+          CHECK(mdb_txn_commit(txn), err1);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -344,7 +357,6 @@ ASYNC_NIF_DECL(
 
     enif_release_resource((void*)args->handle);
   });
-
 
 /**
  * Update and existin value indexed by key.
@@ -399,9 +411,16 @@ ASYNC_NIF_DECL(
       mdata.mv_size = val.size;
       mdata.mv_data = val.data;
 
-      CHECK(mdb_txn_begin(args->handle->env, NULL, 0, & txn), err2);
+      if(args->handle->txn == NULL) {
+          CHECK(mdb_txn_begin(args->handle->env, NULL, 0, & txn), err2);
+      } else {
+          txn = args->handle->txn;
+      }
+
       CHECK(mdb_put(txn, args->handle->dbi, &mkey, &mdata, 0), err1);
-      CHECK(mdb_txn_commit(txn), err1);
+
+      if(args->handle->txn == NULL)
+          CHECK(mdb_txn_commit(txn), err1);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -461,10 +480,15 @@ ASYNC_NIF_DECL(
       mkey.mv_size  = key.size;
       mkey.mv_data  = key.data;
 
-      CHECK(mdb_txn_begin(args->handle->env, NULL, 0, &txn), err);
+      if(args->handle->txn == NULL) {
+          CHECK(mdb_txn_begin(args->handle->env, NULL, 0, & txn), err);
+      } else {
+          txn = args->handle->txn;
+      }
 
       ret = mdb_get(txn, args->handle->dbi, &mkey, &mdata);
-      mdb_txn_abort(txn);
+      if(args->handle->txn == NULL)
+          mdb_txn_abort(txn);
       if (MDB_NOTFOUND == ret) {
 	  ASYNC_NIF_REPLY(ATOM_NOT_FOUND);
 	  return;
@@ -532,16 +556,22 @@ ASYNC_NIF_DECL(
       mkey.mv_size  = key.size;
       mkey.mv_data  = key.data;
 
-      CHECK(mdb_txn_begin(args->handle->env, NULL, 0, & txn), err);
+      if(args->handle->txn == NULL) {
+          CHECK(mdb_txn_begin(args->handle->env, NULL, 0, & txn), err);
+      } else {
+          txn = args->handle->txn;
+      }
+
       ret = mdb_del(txn, args->handle->dbi, &mkey, NULL);
 
       if(MDB_NOTFOUND == ret) {
-	  mdb_txn_abort(txn);
+          if(args->handle->txn == NULL)
+              mdb_txn_abort(txn);
 	  ASYNC_NIF_REPLY(ATOM_NOT_FOUND);
 	  return;
       }
-
-      CHECK(mdb_txn_commit(txn), err);
+      if(args->handle->txn == NULL)
+          CHECK(mdb_txn_commit(txn), err);
       ASYNC_NIF_REPLY(ATOM_OK);
       return;
 
@@ -600,7 +630,109 @@ ASYNC_NIF_DECL(
     enif_release_resource((void*)args->handle);
   });
 
+ASYNC_NIF_DECL(
+  lmdb_txn_begin,
+  { // struct
 
+      struct lmdb *handle;
+  },
+  { // pre
+
+      if (!(argc == 1 &&
+        enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle))) {
+      ASYNC_NIF_RETURN_BADARG();
+      }
+      if (!args->handle->env)
+      ASYNC_NIF_RETURN_BADARG();
+      enif_keep_resource((void*)args->handle);
+  },
+  { // work
+
+      ERL_NIF_TERM err;
+      int ret;
+      if(args->handle->txn == NULL) {
+          CHECK(mdb_txn_begin(args->handle->env, NULL, 0, &(args->handle->txn)), err2);
+          ASYNC_NIF_REPLY(ATOM_OK);
+      } else
+          ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_ERROR, ATOM_TXN_STARTED));
+      return;
+
+  err2:
+      ASYNC_NIF_REPLY(err);
+      return;
+  },
+  { // post
+
+    enif_release_resource((void*)args->handle);
+  });
+
+ASYNC_NIF_DECL(
+  lmdb_txn_commit,
+  { // struct
+
+      struct lmdb *handle;
+  },
+  { // pre
+
+      if (!(argc == 1 &&
+        enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle))) {
+      ASYNC_NIF_RETURN_BADARG();
+      }
+      if (!args->handle->env)
+      ASYNC_NIF_RETURN_BADARG();
+      enif_keep_resource((void*)args->handle);
+  },
+  { // work
+
+      ERL_NIF_TERM err;
+      int ret;
+      if(args->handle->txn != NULL) {
+          CHECK(mdb_txn_commit(args->handle->txn), err2);
+          args->handle->txn = NULL;
+          ASYNC_NIF_REPLY(ATOM_OK);
+      } else
+          ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_ERROR, ATOM_TXN_NOT_STARTED));
+      return;
+
+  err2:
+      ASYNC_NIF_REPLY(err);
+      return;
+  },
+  { // post
+
+    enif_release_resource((void*)args->handle);
+  });
+
+ASYNC_NIF_DECL(
+  lmdb_txn_abort,
+  { // struct
+
+      struct lmdb *handle;
+  },
+  { // pre
+
+      if (!(argc == 1 &&
+        enif_get_resource(env, argv[0], lmdb_RESOURCE, (void**)&args->handle))) {
+      ASYNC_NIF_RETURN_BADARG();
+      }
+      if (!args->handle->env)
+      ASYNC_NIF_RETURN_BADARG();
+      enif_keep_resource((void*)args->handle);
+  },
+  { // work
+
+      if(args->handle->txn != NULL) {
+          mdb_txn_abort(args->handle->txn);
+          args->handle->txn = NULL;
+          ASYNC_NIF_REPLY(ATOM_OK);
+      } else
+          ASYNC_NIF_REPLY(enif_make_tuple(env, 2, ATOM_ERROR, ATOM_TXN_NOT_STARTED));
+      return;
+  },
+  { // post
+
+    enif_release_resource((void*)args->handle);
+  });
 
 static int lmdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
 {
@@ -640,6 +772,9 @@ static int lmdb_load(ErlNifEnv* env, void** priv_data, ERL_NIF_TERM load_info)
     ATOM_MAP_RESIZED = enif_make_atom(env, "map_resized");
     ATOM_INCOMPATIBLE = enif_make_atom(env, "incompatible");
     ATOM_BAD_RSLOT = enif_make_atom(env, "bad_rslot");
+
+    ATOM_TXN_STARTED = enif_make_atom(env, "txn_started");
+    ATOM_TXN_NOT_STARTED = enif_make_atom(env, "txn_not_started");
 
     lmdb_RESOURCE = enif_open_resource_type(env, NULL, "lmdb_resource",
 					    NULL, flags, NULL);
@@ -681,7 +816,15 @@ static ErlNifFunc nif_funcs [] = {
     {"get",         3, lmdb_get},
     {"del",         3, lmdb_del},
     {"update",      4, lmdb_update},
-    {"drop",        2, lmdb_drop}
+    {"drop",        2, lmdb_drop},
+
+    {"txn_begin",   2, lmdb_txn_begin},
+    {"txn_commit",  2, lmdb_txn_commit},
+    {"txn_abort",   2, lmdb_txn_abort}/*,
+
+    {"cursor_open",  2, lmdb_cursor_open},
+    {"cursor_close", 2, lmdb_cursor_close} */
+
 };
 
 /* driver entry point */

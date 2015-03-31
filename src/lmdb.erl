@@ -32,7 +32,7 @@
 %% EXPORTS
 %%====================================================================
 -export([
-         %open/1,
+         open/1,
          open/2,
          open/3,
 
@@ -40,8 +40,11 @@
 
          put/3,
          get/2,
+         txn_begin/1,
+         txn_commit/1,
+         txn_abort/1,
          del/2,
-	 update/3, upd/3,
+	     update/3, upd/3,
 
          drop/1
         ]).
@@ -80,8 +83,8 @@
 %% @doc Create a new MDB database
 %% @end
 %%--------------------------------------------------------------------
-%open(DirName) ->
-%    open(DirName, ?MDB_MAP_SIZE).
+open(DirName) ->
+    open(DirName, ?MDB_MAP_SIZE).
 open(DirName, MapSize)
   when is_integer(MapSize)
        andalso MapSize > 0 ->
@@ -114,6 +117,24 @@ get(Handle, Key)
     ?ASYNC_NIF_CALL(fun get/3, [Handle, Key]).
 
 get(_AsyncRef, _Handle, _Key) ->
+    ?NOT_LOADED.
+
+txn_begin(Handle) ->
+    ?ASYNC_NIF_CALL(fun txn_begin/2, [Handle]).
+
+txn_begin(_AsyncRef, _Handle) ->
+    ?NOT_LOADED.
+
+txn_commit(Handle) ->
+    ?ASYNC_NIF_CALL(fun txn_commit/2, [Handle]).
+
+txn_commit(_AsyncRef, _Handle) ->
+    ?NOT_LOADED.
+
+txn_abort(Handle) ->
+    ?ASYNC_NIF_CALL(fun txn_abort/2, [Handle]).
+
+txn_abort(_AsyncRef, _Handle) ->
     ?NOT_LOADED.
 
 del(Handle, Key)

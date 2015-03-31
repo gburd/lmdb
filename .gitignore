@@ -5,3 +5,4 @@ c_src/*.o
 deps/
 priv/
 *~
+.rebar
