@@ -3,7 +3,7 @@
 /* $OpenLDAP$ */
 /* This work is part of OpenLDAP Software <http://www.openldap.org/>.
  *
- * Copyright 2000-2013 The OpenLDAP Foundation.
+ * Copyright 2000-2016 The OpenLDAP Foundation.
  * All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -20,10 +20,9 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <sys/types.h>
-#include <assert.h>
 #include "midl.h"
 
-/** @defgroup internal	MDB Internals
+/** @defgroup internal	LMDB Internals
  *	@{
  */
 /** @defgroup idls	ID List Management
@@ -31,8 +30,7 @@
  */
 #define CMP(x,y)	 ( (x) < (y) ? -1 : (x) > (y) )
 
-#if 0	/* superseded by append/sort */
-static unsigned mdb_midl_search( MDB_IDL ids, MDB_ID id )
+unsigned mdb_midl_search( MDB_IDL ids, MDB_ID id )
 {
 	/*
 	 * binary search of id in ids
@@ -67,20 +65,10 @@ static unsigned mdb_midl_search( MDB_IDL ids, MDB_ID id )
 	return cursor;
 }
 
+#if 0	/* superseded by append/sort */
 int mdb_midl_insert( MDB_IDL ids, MDB_ID id )
 {
 	unsigned x, i;
-
-	if (MDB_IDL_IS_RANGE( ids )) {
-		/* if already in range, treat as a dup */
-		if (id >= MDB_IDL_RANGE_FIRST(ids) && id <= MDB_IDL_RANGE_LAST(ids))
-			return -1;
-		if (id < MDB_IDL_RANGE_FIRST(ids))
-			ids[1] = id;
-		else if (id > MDB_IDL_RANGE_LAST(ids))
-			ids[2] = id;
-		return 0;
-	}
 
 	x = mdb_midl_search( ids, id );
 	assert( x > 0 );
@@ -97,15 +85,9 @@ int mdb_midl_insert( MDB_IDL ids, MDB_ID id )
 	}
 
 	if ( ++ids[0] >= MDB_IDL_DB_MAX ) {
-		if( id < ids[1] ) {
-			ids[1] = id;
-			ids[2] = ids[ids[0]-1];
-		} else if ( ids[ids[0]-1] < id ) {
-			ids[2] = id;
-		} else {
-			ids[2] = ids[ids[0]-1];
-		}
-		ids[0] = MDB_NOID;
+		/* no room */
+		--ids[0];
+		return -2;
 
 	} else {
 		/* insert id */
@@ -121,8 +103,10 @@ int mdb_midl_insert( MDB_IDL ids, MDB_ID id )
 MDB_IDL mdb_midl_alloc(int num)
 {
 	MDB_IDL ids = malloc((num+2) * sizeof(MDB_ID));
-	if (ids)
+	if (ids) {
 		*ids++ = num;
+		*ids = 0;
+	}
 	return ids;
 }
 
@@ -132,19 +116,18 @@ void mdb_midl_free(MDB_IDL ids)
 		free(ids-1);
 }
 
-int mdb_midl_shrink( MDB_IDL *idp )
+void mdb_midl_shrink( MDB_IDL *idp )
 {
 	MDB_IDL ids = *idp;
-	if (*(--ids) > MDB_IDL_UM_MAX) {
-		ids = realloc(ids, (MDB_IDL_UM_MAX+1) * sizeof(MDB_ID));
+	if (*(--ids) > MDB_IDL_UM_MAX &&
+		(ids = realloc(ids, (MDB_IDL_UM_MAX+2) * sizeof(MDB_ID))))
+	{
 		*ids++ = MDB_IDL_UM_MAX;
 		*idp = ids;
-		return 1;
 	}
-	return 0;
 }
 
-int mdb_midl_grow( MDB_IDL *idp, int num )
+static int mdb_midl_grow( MDB_IDL *idp, int num )
 {
 	MDB_IDL idn = *idp-1;
 	/* grow it */
@@ -153,6 +136,20 @@ int mdb_midl_grow( MDB_IDL *idp, int num )
 		return ENOMEM;
 	*idn++ += num;
 	*idp = idn;
+	return 0;
+}
+
+int mdb_midl_need( MDB_IDL *idp, unsigned num )
+{
+	MDB_IDL ids = *idp;
+	num += ids[0];
+	if (num > ids[-1]) {
+		num = (num + num/4 + (256 + 2)) & -256;
+		if (!(ids = realloc(ids-1, num * sizeof(MDB_ID))))
+			return ENOMEM;
+		*ids++ = num - 2;
+		*idp = ids;
+	}
 	return 0;
 }
 
@@ -184,10 +181,40 @@ int mdb_midl_append_list( MDB_IDL *idp, MDB_IDL app )
 	return 0;
 }
 
+int mdb_midl_append_range( MDB_IDL *idp, MDB_ID id, unsigned n )
+{
+	MDB_ID *ids = *idp, len = ids[0];
+	/* Too big? */
+	if (len + n > ids[-1]) {
+		if (mdb_midl_grow(idp, n | MDB_IDL_UM_MAX))
+			return ENOMEM;
+		ids = *idp;
+	}
+	ids[0] = len + n;
+	ids += len;
+	while (n)
+		ids[n--] = id++;
+	return 0;
+}
+
+void mdb_midl_xmerge( MDB_IDL idl, MDB_IDL merge )
+{
+	MDB_ID old_id, merge_id, i = merge[0], j = idl[0], k = i+j, total = k;
+	idl[0] = (MDB_ID)-1;		/* delimiter for idl scan below */
+	old_id = idl[j];
+	while (i) {
+		merge_id = merge[i--];
+		for (; old_id < merge_id; old_id = idl[--j])
+			idl[k--] = old_id;
+		idl[k--] = merge_id;
+	}
+	idl[0] = total;
+}
+
 /* Quicksort + Insertion sort for small arrays */
 
 #define SMALL	8
-#define	SWAP(a,b)	{ itmp=(a); (a)=(b); (b)=itmp; }
+#define	MIDL_SWAP(a,b)	{ itmp=(a); (a)=(b); (b)=itmp; }
 
 void
 mdb_midl_sort( MDB_IDL ids )
@@ -215,15 +242,15 @@ mdb_midl_sort( MDB_IDL ids )
 			l = istack[jstack--];
 		} else {
 			k = (l + ir) >> 1;	/* Choose median of left, center, right */
-			SWAP(ids[k], ids[l+1]);
+			MIDL_SWAP(ids[k], ids[l+1]);
 			if (ids[l] < ids[ir]) {
-				SWAP(ids[l], ids[ir]);
+				MIDL_SWAP(ids[l], ids[ir]);
 			}
 			if (ids[l+1] < ids[ir]) {
-				SWAP(ids[l+1], ids[ir]);
+				MIDL_SWAP(ids[l+1], ids[ir]);
 			}
 			if (ids[l] < ids[l+1]) {
-				SWAP(ids[l], ids[l+1]);
+				MIDL_SWAP(ids[l], ids[l+1]);
 			}
 			i = l+1;
 			j = ir;
@@ -232,7 +259,7 @@ mdb_midl_sort( MDB_IDL ids )
 				do i++; while(ids[i] > a);
 				do j--; while(ids[j] < a);
 				if (j < i) break;
-				SWAP(ids[i],ids[j]);
+				MIDL_SWAP(ids[i],ids[j]);
 			}
 			ids[l+1] = ids[j];
 			ids[j] = a;
@@ -290,7 +317,6 @@ int mdb_mid2l_insert( MDB_ID2L ids, MDB_ID2 *id )
 	unsigned x, i;
 
 	x = mdb_mid2l_search( ids, id->mid );
-	assert( x > 0 );
 
 	if( x < 1 ) {
 		/* internal error */
@@ -328,7 +354,67 @@ int mdb_mid2l_append( MDB_ID2L ids, MDB_ID2 *id )
 	return 0;
 }
 
-/** @} */
-/** @} */
+#ifdef MDB_VL32
+unsigned mdb_mid3l_search( MDB_ID3L ids, MDB_ID id )
+{
+	/*
+	 * binary search of id in ids
+	 * if found, returns position of id
+	 * if not found, returns first position greater than id
+	 */
+	unsigned base = 0;
+	unsigned cursor = 1;
+	int val = 0;
+	unsigned n = (unsigned)ids[0].mid;
 
-/* http://gitorious.org/mdb/mdb/blobs/raw/mdb.master/libraries/liblmdb/midl.c */
+	while( 0 < n ) {
+		unsigned pivot = n >> 1;
+		cursor = base + pivot + 1;
+		val = CMP( id, ids[cursor].mid );
+
+		if( val < 0 ) {
+			n = pivot;
+
+		} else if ( val > 0 ) {
+			base = cursor;
+			n -= pivot + 1;
+
+		} else {
+			return cursor;
+		}
+	}
+
+	if( val > 0 ) {
+		++cursor;
+	}
+	return cursor;
+}
+
+int mdb_mid3l_insert( MDB_ID3L ids, MDB_ID3 *id )
+{
+	unsigned x, i;
+
+	x = mdb_mid3l_search( ids, id->mid );
+
+	if( x < 1 ) {
+		/* internal error */
+		return -2;
+	}
+
+	if ( x <= ids[0].mid && ids[x].mid == id->mid ) {
+		/* duplicate */
+		return -1;
+	}
+
+	/* insert id */
+	ids[0].mid++;
+	for (i=(unsigned)ids[0].mid; i>x; i--)
+		ids[i] = ids[i-1];
+	ids[x] = *id;
+
+	return 0;
+}
+#endif /* MDB_VL32 */
+
+/** @} */
+/** @} */
