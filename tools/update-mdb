@@ -1,0 +1,6 @@
+#!/bin/bash
+
+for file in lmdb.h mdb.c midl.h midl.c; do
+  curl -O https://raw.githubusercontent.com/LMDB/lmdb/mdb.master/libraries/liblmdb/$file
+done
+

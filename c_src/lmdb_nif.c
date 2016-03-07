@@ -102,7 +102,7 @@ static ERL_NIF_TERM ATOM_TXN_NOT_STARTED;
 static ERL_NIF_TERM
 __strerror_term(ErlNifEnv* env, int err)
 {
-    ERL_NIF_TERM term;
+    ERL_NIF_TERM term = 0;
 
     if (err < MDB_LAST_ERRCODE && err > MDB_KEYEXIST) {
 	switch (err) {

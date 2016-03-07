@@ -10671,6 +10671,7 @@ int mdb_set_relctx(MDB_txn *txn, MDB_dbi dbi, void *ctx)
 int ESECT
 mdb_env_get_maxkeysize(MDB_env *env)
 {
+	env = env;
 	return ENV_MAXKEY(env);
 }
 
