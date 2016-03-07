@@ -198,7 +198,7 @@ open_test_db() ->
     ?cmd("rm -rf " ++ DataDir),
     ?assertMatch(ok, filelib:ensure_dir(filename:join([DataDir, "x"]))),
     {ok, Handle} = ?MODULE:open(DataDir, 2147483648),
-    [?MODULE:upd(Handle, crypto:sha(<<X>>),
+    [?MODULE:upd(Handle, crypto:hash(sha, <<X>>),
 		 crypto:rand_bytes(crypto:rand_uniform(128, 4096))) ||
 	X <- lists:seq(1, 10)],
     Handle.
