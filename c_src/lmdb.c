@@ -2769,7 +2769,7 @@ mdb_env_write_meta(MDB_txn *txn)
 #ifdef _WIN32
 		WriteFile(env->me_fd, ptr, len, NULL, &ov);
 #else
-		pwrite(env->me_fd, ptr, len, off);
+		rc = pwrite(env->me_fd, ptr, len, off);
 #endif
 fail:
 		env->me_flags |= MDB_FATAL_ERROR;
